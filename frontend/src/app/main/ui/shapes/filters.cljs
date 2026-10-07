@@ -116,14 +116,9 @@
              :result filter-id}])
 
 (mf/defc filter-entry* [{:keys [entry]}]
-  ;; The entries below are Rumext components, and Rumext reads their props as
-  ;; camelCase JS properties (`props.filterId`). A kebab-case key here is never
-  ;; read, `result` and `in2` end up undefined, and the inner shadow's final
-  ;; feBlend loses its `in2`: the source graphic never gets composited back,
-  ;; so the shape renders as the shadow alone (fill and children invisible).
-  (let [props #js {"filterId" (:id entry)
-                   "filterIn" (:filter-in entry)
-                   "params" (:params entry)}]
+  (let [props (mf/props {:filter-id (:id entry)
+                         :filter-in (:filter-in entry)
+                         :params (:params entry)})]
     (case (:type entry)
       :drop-shadow [:> drop-shadow-filter* props]
       :inner-shadow [:> inner-shadow-filter* props]
