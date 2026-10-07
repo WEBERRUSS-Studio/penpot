@@ -12,6 +12,9 @@
    [frontend-tests.data.dashboard-test]
    [frontend-tests.data.event-test]
    [frontend-tests.data.exports-assets-test]
+   [frontend-tests.data.exports-files-test]
+   [frontend-tests.data.imports-test]
+   [frontend-tests.data.jobs-test]
    [frontend-tests.data.nitrate-test]
    [frontend-tests.data.persistence-retry-test]
    [frontend-tests.data.persistence-test]
@@ -110,7 +113,11 @@
    [frontend-tests.ui.ds-controls-numeric-input-test]
    [frontend-tests.ui.gradient-handlers-test]
    [frontend-tests.ui.history-test]
+   [frontend-tests.ui.inspect-geometry-test]
+   [frontend-tests.ui.inspect-stroke-tokens-test]
+   [frontend-tests.ui.jobs-progress-test]
    [frontend-tests.ui.layout-container-multiple-test]
+   [frontend-tests.ui.measurements-test]
    [frontend-tests.ui.measures-menu-props-test]
    [frontend-tests.ui.organization-team-switch-test]
    [frontend-tests.ui.routes-test]
@@ -159,6 +166,9 @@
    'frontend-tests.data.repo-test
    'frontend-tests.data.store-test
    'frontend-tests.data.exports-assets-test
+   'frontend-tests.data.exports-files-test
+   'frontend-tests.data.imports-test
+   'frontend-tests.data.jobs-test
    'frontend-tests.data.svg-upload-test
    'frontend-tests.data.uploads-test
    'frontend-tests.data.viewer-test
@@ -249,7 +259,11 @@
    'frontend-tests.ui.ds-controls-numeric-input-test
    'frontend-tests.ui.gradient-handlers-test
    'frontend-tests.ui.history-test
+   'frontend-tests.ui.inspect-geometry-test
+   'frontend-tests.ui.inspect-stroke-tokens-test
+   'frontend-tests.ui.jobs-progress-test
    'frontend-tests.ui.layout-container-multiple-test
+   'frontend-tests.ui.measurements-test
    'frontend-tests.ui.measures-menu-props-test
    'frontend-tests.ui.organization-team-switch-test
    'frontend-tests.ui.routes-test

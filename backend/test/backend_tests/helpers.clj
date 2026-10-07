@@ -102,6 +102,22 @@
        (fs/create-dir "/tmp/penpot")
        (next)))))
 
+(defn- remove-job-runners
+  "Drops every `[<profile> :app.worker/runner]` from the system.
+
+  The tests drive the runner loop by hand (`wdisp/run-batch` plus
+  `run-worker-loop` over a system they build themselves), so a live runner
+  of any queue races them: it takes the job the test just dispatched and
+  completes it behind the test's back. Matching the key by shape, instead
+  of listing the known queues by hand, keeps a new queue from silently
+  bringing that race back (which is what happened to the `binfile` runner
+  this key list was missing)."
+  [system]
+  (apply dissoc system
+         (filter #(and (vector? %)
+                       (= :app.worker/runner (second %)))
+                 (keys system))))
+
 (defn init-system
   [next]
   (let [templates [{:id "test"
@@ -132,10 +148,8 @@
                            :app.loggers.mattermost/reporter
                            :app.loggers.database/reporter
                            :app.worker/cron
-                           :app.worker/dispatcher
-                           [:app.main/default :app.worker/runner]
-                           [:app.main/webhook :app.worker/runner]
-                           [:app.main/cron :app.worker/runner]))
+                           :app.worker/dispatcher)
+                   (remove-job-runners))
         _      (ig/load-namespaces system)
         system (-> (ig/expand system) (ig/init))]
     (try
@@ -309,9 +323,7 @@
   ([params] (create-project-role* *system* params))
   ([system {:keys [project-id profile-id role] :or {role :owner}}]
    (dm/with-open [conn (db/open system)]
-     (#'teams/create-project-role conn {:project-id project-id
-                                        :profile-id profile-id
-                                        :role role}))))
+     (#'teams/create-project-role conn profile-id project-id role))))
 
 (defn create-file-role*
   ([params] (create-file-role* *system* params))
