@@ -73,6 +73,7 @@
    [frontend-tests.plugins.interactions-test]
    [frontend-tests.plugins.library-test]
    [frontend-tests.plugins.local-storage-test]
+   [frontend-tests.plugins.management-test]
    [frontend-tests.plugins.page-active-validation-test]
    [frontend-tests.plugins.page-test]
    [frontend-tests.plugins.parser-test]
@@ -88,7 +89,9 @@
    [frontend-tests.render-wasm.serialization-test]
    [frontend-tests.render-wasm.text-editor-apply-styles-test]
    [frontend-tests.render-wasm.text-editor-caret-color-test]
+   [frontend-tests.render-wasm.text-editor-content-range-test]
    [frontend-tests.render-wasm.text-paste-test]
+   [frontend-tests.render-wasm.webgl-test]
    [frontend-tests.router-test]
    [frontend-tests.svg-fills-test]
    [frontend-tests.svg-filters-test]
@@ -123,6 +126,7 @@
    [frontend-tests.ui.routes-test]
    [frontend-tests.ui.settings-password-schema-test]
    [frontend-tests.ui.settings-shortcuts-test]
+   [frontend-tests.ui.shape-filters-test]
    [frontend-tests.ui.shortcuts-labels-test]
    [frontend-tests.ui.sidebar-scroll-test]
    [frontend-tests.ui.stroke-menu-test]
@@ -214,6 +218,7 @@
    'frontend-tests.plugins.comments-test
    'frontend-tests.plugins.context-shapes-test
    'frontend-tests.plugins.events-test
+   'frontend-tests.plugins.management-test
    'frontend-tests.plugins.file-test
    'frontend-tests.plugins.flex-test
    'frontend-tests.plugins.format-test
@@ -235,7 +240,9 @@
    'frontend-tests.render-wasm.serialization-test
    'frontend-tests.render-wasm.text-editor-apply-styles-test
    'frontend-tests.render-wasm.text-editor-caret-color-test
+   'frontend-tests.render-wasm.text-editor-content-range-test
    'frontend-tests.render-wasm.text-paste-test
+   'frontend-tests.render-wasm.webgl-test
    'frontend-tests.router-test
    'frontend-tests.svg-fills-test
    'frontend-tests.svg-filters-test
@@ -271,6 +278,7 @@
    'frontend-tests.text-editor-paste-guard-test
    'frontend-tests.ui.settings-password-schema-test
    'frontend-tests.ui.settings-shortcuts-test
+   'frontend-tests.ui.shape-filters-test
    'frontend-tests.ui.shortcuts-labels-test
    'frontend-tests.ui.sidebar-scroll-test
    'frontend-tests.ui.stroke-menu-test
