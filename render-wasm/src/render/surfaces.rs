@@ -6,12 +6,13 @@ use crate::{get_gpu_state, performance};
 use skia_safe::{self as skia, IRect, Paint, RRect, Rect};
 
 use super::{gpu_state::GpuState, tiles, tiles::Tile, tiles::TileRect, tiles::TileViewbox};
-use crate::math::Point;
+#[cfg(test)]
+#[path = "surfaces_tests.rs"]
+mod tests;
 
 use base64::{engine::general_purpose, Engine as _};
 use std::collections::{HashMap, HashSet};
 
-const TEXTURES_CACHE_CAPACITY: usize = 1024;
 const TEXTURES_BATCH_DELETE: usize = 256;
 
 // This is the amount of extra space we're going to give to all the surfaces to render shapes.
@@ -35,6 +36,7 @@ fn draw_surface_src_rect_to_dst(
     src: skia::Rect,
     dst: skia::Rect,
     sampling: skia::SamplingOptions,
+    paint: Option<&Paint>,
 ) {
     if src.is_empty() || dst.is_empty() {
         return;
@@ -48,34 +50,64 @@ fn draw_surface_src_rect_to_dst(
     to_canvas.translate((dst.left, dst.top));
     to_canvas.scale((sx, sy));
     to_canvas.translate((-src.left, -src.top));
-    from.draw(to_canvas, (0.0, 0.0), sampling, None);
+    from.draw(to_canvas, (0.0, 0.0), sampling, paint);
     to_canvas.restore();
 }
 
-/// Copy a rendered tile into an atlas slot. Packed slots keep a 1px border so
-/// Linear filtering on compose does not sample the neighboring cell.
-fn blit_drawable_into_tile_atlas_slot(
-    current: &mut skia::Surface,
-    atlas_canvas: &skia::Canvas,
-    src: skia::Rect,
-    slot: skia::Rect,
-    slot_size: i32,
-) {
-    let nearest = skia::SamplingOptions::new(skia::FilterMode::Nearest, skia::MipmapMode::None);
-    let content = tiles::tile_atlas_content_rect(slot, slot_size);
-    if content == slot {
-        draw_surface_src_rect_to_dst(current, atlas_canvas, src, slot, nearest);
-        return;
+/// One native-resolution atlas page. Drop its snapshot before writing so
+/// Skia need not copy an entire texture to preserve the old image (COW).
+struct TileAtlasPage {
+    surface: skia::Surface,
+    image: Option<skia::Image>,
+}
+
+impl TileAtlasPage {
+    fn new(surface: skia::Surface) -> Self {
+        Self {
+            surface,
+            image: None,
+        }
     }
 
-    let linear = skia::SamplingOptions::new(skia::FilterMode::Linear, skia::MipmapMode::None);
-    draw_surface_src_rect_to_dst(current, atlas_canvas, src, content, linear);
+    fn write_tile(&mut self, current: &mut skia::Surface, src: Rect, slot: Rect) {
+        debug_assert_eq!(src.size(), slot.size());
+        self.image = None;
+        let nearest = skia::SamplingOptions::new(skia::FilterMode::Nearest, skia::MipmapMode::None);
+        let mut paint = Paint::default();
+        paint.set_blend_mode(skia::BlendMode::Src);
+        draw_surface_src_rect_to_dst(
+            current,
+            self.surface.canvas(),
+            src,
+            slot,
+            nearest,
+            Some(&paint),
+        );
+    }
 
-    atlas_canvas.save();
-    atlas_canvas.clip_rect(slot, None, false);
-    atlas_canvas.clip_rect(content, Some(skia::ClipOp::Difference), false);
-    draw_surface_src_rect_to_dst(current, atlas_canvas, src, slot, nearest);
-    atlas_canvas.restore();
+    fn draw(
+        &mut self,
+        canvas: &skia::Canvas,
+        batch: &AtlasDrawBatch,
+        sampling: skia::SamplingOptions,
+    ) {
+        if batch.transforms.is_empty() {
+            return;
+        }
+        let image = self
+            .image
+            .get_or_insert_with(|| self.surface.image_snapshot());
+        canvas.draw_atlas(
+            image,
+            &batch.transforms,
+            &batch.textures,
+            None,
+            skia::BlendMode::SrcOver,
+            sampling,
+            None,
+            None,
+        );
+    }
 }
 
 pub fn get_cache_size(viewbox: &Viewbox, interest: i32) -> skia::ISize {
@@ -359,7 +391,7 @@ impl DocAtlas {
             (clipped_doc_rect.height() / th) * dh,
         );
 
-        draw_surface_src_rect_to_dst(current, self.surface.canvas(), src, dst, sampling);
+        draw_surface_src_rect_to_dst(current, self.surface.canvas(), src, dst, sampling, None);
         Ok(())
     }
 
@@ -501,8 +533,7 @@ pub struct Surfaces {
     // Persistent viewport-sized surface used to keep the last presented frame.
     backbuffer: skia::Surface,
     // Atlas used to keep tiles.
-    tile_atlas: skia::Surface,
-    tile_atlas_image: Option<skia::Image>,
+    tile_atlas_pages: Vec<TileAtlasPage>,
 
     tiles: TileTextureCache,
     pub atlas: DocAtlas,
@@ -567,8 +598,7 @@ impl Surfaces {
             debug,
             export,
             backbuffer,
-            tile_atlas,
-            tile_atlas_image: None,
+            tile_atlas_pages: vec![TileAtlasPage::new(tile_atlas)],
             tiles,
             atlas,
             sampling_options,
@@ -583,18 +613,14 @@ impl Surfaces {
         })
     }
 
-    /// Pack `needed_slots` into the existing 4096 atlas by shrinking the
-    /// physical cell size. No-op when the layout already fits.
+    /// Bound native-resolution storage by the viewport plus its interest ring.
+    /// Growing preserves cached pixels; GPU pages are allocated on first use.
+    /// Shrinking drops trailing pages rather than retaining a large-window peak.
     pub fn ensure_tile_atlas_layout(&mut self, needed_slots: usize) {
-        let atlas_px = self.tile_atlas.width().min(self.tile_atlas.height());
-        let slot = tiles::tile_atlas_slot_size(needed_slots, atlas_px);
-        if slot == self.tiles.slot_size() {
-            return;
-        }
-        self.tiles
-            .repack(self.tile_atlas.width(), self.tile_atlas.height(), slot);
-        self.tile_atlas.canvas().clear(skia::Color::TRANSPARENT);
-        self.tile_atlas_image = None;
+        let atlas_px = self.tile_atlas_pages[0].surface.width();
+        let pages = tiles::tile_atlas_page_count(needed_slots, atlas_px);
+        self.tiles.set_page_count(pages);
+        self.tile_atlas_pages.truncate(pages);
     }
 
     pub fn set_dpr(&mut self, dpr: f32) {
@@ -605,14 +631,6 @@ impl Surfaces {
         self.tiles.clear();
     }
 
-    fn tile_atlas_sampling(&self) -> skia::SamplingOptions {
-        if self.tiles.slot_size() < TILE_SIZE {
-            skia::SamplingOptions::new(skia::FilterMode::Linear, skia::MipmapMode::None)
-        } else {
-            self.atlas_sampling_options
-        }
-    }
-
     pub fn draw_tile_atlas_to_backbuffer(
         &mut self,
         viewbox: &Viewbox,
@@ -620,26 +638,11 @@ impl Surfaces {
         background: skia::Color,
     ) {
         self.tiles.update(viewbox, tile_viewbox);
-        if self.tiles.needs_snapshot() || self.tile_atlas_image.is_none() {
-            self.tile_atlas_image = Some(self.tile_atlas.image_snapshot());
-            self.tiles.snapshot();
-        }
-        let Some(atlas_image) = self.tile_atlas_image.as_ref() else {
-            return;
-        };
-        let sampling = self.tile_atlas_sampling();
         let canvas = self.backbuffer.canvas();
         canvas.clear(background);
-        canvas.draw_atlas(
-            atlas_image,
-            &self.tiles.transforms,
-            &self.tiles.textures,
-            None,
-            skia::BlendMode::SrcOver,
-            sampling,
-            None,
-            None,
-        );
+        for (page, batch) in self.tile_atlas_pages.iter_mut().zip(&self.tiles.batches) {
+            page.draw(canvas, batch, self.atlas_sampling_options);
+        }
     }
 
     /// Draw the persistent atlas onto the backbuffer using the current viewbox transform.
@@ -695,38 +698,21 @@ impl Surfaces {
             return;
         }
 
-        let batch = self.tiles.build_atlas_draw_batch_for_doc_rects(
+        let batches = self.tiles.build_atlas_draw_batch_for_doc_rects(
             viewbox,
             tile_viewbox,
             &self.atlas.tile_doc_rects,
         );
-        if batch.is_empty() {
-            return;
-        }
-
-        if self.tiles.needs_snapshot() || self.tile_atlas_image.is_none() {
-            self.tile_atlas_image = Some(self.tile_atlas.image_snapshot());
-            self.tiles.snapshot();
-        }
-        let Some(atlas_image) = self.tile_atlas_image.as_ref() else {
-            return;
-        };
-        let sampling = self.tile_atlas_sampling();
-
         let canvas = self.backbuffer.canvas();
         canvas.save();
         canvas.reset_matrix();
-
-        canvas.draw_atlas(
-            atlas_image,
-            &batch.transforms,
-            &batch.textures,
-            None,
-            skia::BlendMode::SrcOver,
-            sampling,
-            None,
-            None,
-        );
+        let pages = self.tiles.batches.len();
+        // Each phase groups by page: scaled previews first, native tiles last.
+        for phase in batches.chunks(pages) {
+            for (page, batch) in self.tile_atlas_pages.iter_mut().zip(phase) {
+                page.draw(canvas, batch, self.atlas_sampling_options);
+            }
+        }
         canvas.restore();
     }
 
@@ -958,7 +944,7 @@ impl Surfaces {
             SurfaceId::UI => &mut self.ui,
             SurfaceId::Export => &mut self.export,
             SurfaceId::Atlas => &mut self.atlas.surface,
-            SurfaceId::TileAtlas => &mut self.tile_atlas,
+            SurfaceId::TileAtlas => &mut self.tile_atlas_pages[0].surface,
         }
     }
 
@@ -979,7 +965,7 @@ impl Surfaces {
             SurfaceId::UI => &self.ui,
             SurfaceId::Export => &self.export,
             SurfaceId::Atlas => &self.atlas.surface,
-            SurfaceId::TileAtlas => &self.tile_atlas,
+            SurfaceId::TileAtlas => &self.tile_atlas_pages[0].surface,
         }
     }
 
@@ -1028,7 +1014,10 @@ impl Surfaces {
     }
 
     pub fn clear_tile_atlas(&mut self) {
-        self.tile_atlas.canvas().clear(skia::Color::TRANSPARENT);
+        for page in &mut self.tile_atlas_pages {
+            page.image = None;
+            page.surface.canvas().clear(skia::Color::TRANSPARENT);
+        }
     }
 
     fn reset_from_target(&mut self, target: skia::Surface) -> Result<()> {
@@ -1283,7 +1272,7 @@ impl Surfaces {
         tile_doc_rect: skia::Rect,
         scale: f32,
         view_doc: skia::Rect,
-    ) {
+    ) -> Result<()> {
         let gpu_state = get_gpu_state();
         let src = skia::Rect::from(TILE_DRAWABLE_RECT);
         let sampling = self.sampling_options;
@@ -1304,14 +1293,17 @@ impl Surfaces {
             .tiles
             .add(tile_viewbox, tile, scale, view_doc, &mut tile_doc_rects);
         self.atlas.tile_doc_rects = tile_doc_rects;
-        let mut current = self.current.clone();
-        blit_drawable_into_tile_atlas_slot(
-            &mut current,
-            self.tile_atlas.canvas(),
-            src,
-            tile_ref.rect,
-            self.tiles.slot_size(),
-        );
+        while self.tile_atlas_pages.len() <= tile_ref.page {
+            let size = self.tile_atlas_pages[0].surface.width();
+            match gpu_state.create_surface_with_dimensions(size, size) {
+                Ok(surface) => self.tile_atlas_pages.push(TileAtlasPage::new(surface)),
+                Err(error) => {
+                    self.tiles.remove_at(*tile, scale);
+                    return Err(error);
+                }
+            }
+        }
+        self.tile_atlas_pages[tile_ref.page].write_tile(&mut self.current, src, tile_ref.rect);
 
         if !skip_cache_surface {
             // Optional legacy Cache surface fill (debug). Pan/zoom preview
@@ -1323,8 +1315,10 @@ impl Surfaces {
                 src,
                 *tile_rect,
                 sampling,
+                None,
             );
         }
+        Ok(())
     }
 
     pub fn has_cached_tile_surface(&self, tile: Tile, scale: f32) -> bool {
@@ -1392,7 +1386,9 @@ impl Surfaces {
                         tile_ref.rect.right as i32,
                         tile_ref.rect.bottom as i32,
                     );
-                    let Some(tile_image) = self.tile_atlas.image_snapshot_with_bounds(bounds)
+                    let Some(tile_image) = self.tile_atlas_pages[tile_ref.page]
+                        .surface
+                        .image_snapshot_with_bounds(bounds)
                     else {
                         panic!("Cannot retrieve tile image");
                     };
@@ -1555,7 +1551,9 @@ impl Surfaces {
     pub fn invalidate_tile_cache(&mut self) {
         self.tiles.clear();
         self.atlas.tile_doc_rects.clear();
-        self.tile_atlas_image = None;
+        for page in &mut self.tile_atlas_pages {
+            page.image = None;
+        }
     }
 
     pub fn gc(&mut self) {
@@ -1620,13 +1618,8 @@ impl Surfaces {
 #[derive(Debug, Clone)]
 pub struct TileAtlasTextureRef {
     pub index: usize,
+    pub page: usize,
     pub rect: skia::Rect,
-}
-
-impl TileAtlasTextureRef {
-    pub fn new(index: usize, rect: skia::Rect) -> Self {
-        Self { index, rect }
-    }
 }
 
 pub struct TileAtlasTextureProvider {
@@ -1659,12 +1652,23 @@ impl TileAtlasTextureProvider {
         }
     }
 
+    pub fn set_page_count(&mut self, pages: usize) {
+        self.length = self.rects.len() * pages.max(1);
+        self.in_use.resize(self.length, false);
+        self.index %= self.length;
+    }
+
     pub fn allocate(&mut self) -> Option<TileAtlasTextureRef> {
         let start = self.index;
         loop {
             if !self.in_use[self.index] {
                 self.in_use[self.index] = true;
-                return Some(TileAtlasTextureRef::new(self.index, self.rects[self.index]));
+                let slots = self.rects.len();
+                return Some(TileAtlasTextureRef {
+                    index: self.index,
+                    page: self.index / slots,
+                    rect: self.rects[self.index % slots],
+                });
             }
 
             self.index = (self.index + 1) % self.length;
@@ -1687,24 +1691,22 @@ impl TileAtlasTextureProvider {
 }
 
 pub struct TileTextureCache {
-    tile_size: f32,
-    slot_size: i32,
-    is_updated: bool,
     provider: TileAtlasTextureProvider,
-    transforms: Vec<skia::RSXform>,
-    textures: Vec<skia::Rect>,
+    batches: Vec<AtlasDrawBatch>,
     grid: HashMap<TileCacheKey, TileAtlasTextureRef>,
     removed: HashSet<TileCacheKey>,
 }
 
+#[derive(Default)]
 pub struct AtlasDrawBatch {
     pub transforms: Vec<skia::RSXform>,
     pub textures: Vec<skia::Rect>,
 }
 
 impl AtlasDrawBatch {
-    pub fn is_empty(&self) -> bool {
-        self.transforms.is_empty()
+    fn push(&mut self, transform: skia::RSXform, texture: skia::Rect) {
+        self.transforms.push(transform);
+        self.textures.push(texture);
     }
 }
 
@@ -1712,34 +1714,21 @@ impl TileTextureCache {
     pub fn new(texture_width: i32, texture_height: i32) -> Self {
         let capacity = ((texture_width / TILE_SIZE) * (texture_height / TILE_SIZE)) as usize;
         Self {
-            tile_size: tiles::TILE_SIZE,
-            slot_size: TILE_SIZE,
-            is_updated: false,
             provider: TileAtlasTextureProvider::new(texture_width, texture_height, TILE_SIZE),
-            transforms: Vec::with_capacity(capacity),
-            textures: Vec::with_capacity(capacity),
+            batches: vec![AtlasDrawBatch::default()],
             grid: HashMap::with_capacity(capacity),
             removed: HashSet::with_capacity(capacity),
         }
     }
 
-    pub fn slot_size(&self) -> i32 {
-        self.slot_size
-    }
-
-    fn dest_scale(&self) -> f32 {
-        tiles::tile_atlas_compose_scale(self.slot_size)
-    }
-
-    pub fn repack(&mut self, texture_width: i32, texture_height: i32, slot_size: i32) {
-        let capacity = ((texture_width / slot_size) * (texture_height / slot_size)) as usize;
-        self.slot_size = slot_size;
-        self.is_updated = true;
-        self.provider = TileAtlasTextureProvider::new(texture_width, texture_height, slot_size);
-        self.transforms = Vec::with_capacity(capacity);
-        self.textures = Vec::with_capacity(capacity);
-        self.grid = HashMap::with_capacity(capacity);
-        self.removed = HashSet::with_capacity(capacity);
+    /// Grow without invalidating existing tiles. Shrinking releases only the
+    /// trailing pages; retained references keep their coordinates and pixels.
+    pub fn set_page_count(&mut self, pages: usize) {
+        let pages = pages.max(1);
+        self.grid.retain(|_, reference| reference.page < pages);
+        self.removed.retain(|key| self.grid.contains_key(key));
+        self.provider.set_page_count(pages);
+        self.batches.resize_with(pages, AtlasDrawBatch::default);
     }
 
     fn gc(&mut self) {
@@ -1750,14 +1739,6 @@ impl TileTextureCache {
                 self.provider.deallocate(tile_ref);
             }
         }
-    }
-
-    pub fn needs_snapshot(&self) -> bool {
-        self.is_updated
-    }
-
-    pub fn snapshot(&mut self) {
-        self.is_updated = false;
     }
 
     fn gc_non_visible(
@@ -1809,28 +1790,13 @@ impl TileTextureCache {
     }
 
     pub fn update(&mut self, viewbox: &Viewbox, tile_viewbox: &TileViewbox) {
-        let dest_scale = self.dest_scale();
         let scale = viewbox.get_scale();
-        if self.transforms.len() != tile_viewbox.visible_rect.len() as usize {
-            self.transforms.resize(
-                tile_viewbox.visible_rect.len() as usize,
-                skia::RSXform::new(dest_scale, 0.0, Point::default()),
-            );
-        }
-
-        if self.textures.len() != tile_viewbox.visible_rect.len() as usize {
-            self.textures.resize(
-                tile_viewbox.visible_rect.len() as usize,
-                skia::Rect::new_empty(),
-            );
-        }
-
-        for texture in self.textures.iter_mut() {
-            texture.set_empty();
+        for batch in &mut self.batches {
+            batch.transforms.clear();
+            batch.textures.clear();
         }
 
         let offset = viewbox.get_offset();
-        let mut index = 0;
         for y in tile_viewbox.visible_rect.top()..=tile_viewbox.visible_rect.bottom() {
             for x in tile_viewbox.visible_rect.left()..=tile_viewbox.visible_rect.right() {
                 let key = TileCacheKey::new(Tile(x, y), scale);
@@ -1843,13 +1809,9 @@ impl TileTextureCache {
                     continue;
                 }
 
-                let (tx, ty) = tiles::tile_screen_xy(Tile(x, y), self.tile_size, offset);
-                self.transforms[index] = skia::RSXform::new(dest_scale, 0.0, (tx, ty));
-
-                let src = tiles::tile_atlas_content_rect(tile_ref.rect, self.slot_size);
-                self.textures[index].set_ltrb(src.left, src.top, src.right, src.bottom);
-
-                index += 1;
+                let (tx, ty) = tiles::tile_screen_xy(Tile(x, y), tiles::TILE_SIZE, offset);
+                self.batches[tile_ref.page]
+                    .push(skia::RSXform::new(1.0, 0.0, (tx, ty)), tile_ref.rect);
             }
         }
     }
@@ -1859,9 +1821,11 @@ impl TileTextureCache {
         viewbox: &Viewbox,
         tile_viewbox: &TileViewbox,
         tile_doc_rects: &HashMap<TileCacheKey, skia::Rect>,
-    ) -> AtlasDrawBatch {
-        let mut transforms = Vec::new();
-        let mut textures = Vec::new();
+    ) -> Vec<AtlasDrawBatch> {
+        // Old-scale previews must be below native-scale tiles, even when
+        // those tiles live on different atlas pages.
+        let pages = self.batches.len();
+        let mut batches: Vec<_> = (0..pages * 2).map(|_| AtlasDrawBatch::default()).collect();
 
         let s = viewbox.get_scale();
         let view_doc = viewbox.area;
@@ -1886,12 +1850,10 @@ impl TileTextureCache {
                     continue;
                 }
 
-                let src = tiles::tile_atlas_content_rect(tile_ref.rect, self.slot_size);
-                let scos = doc_rect.width() * s / src.width();
-                let (tx, ty) = tiles::doc_rect_screen_xy(doc_rect, viewbox.pan, s);
-
-                transforms.push(skia::RSXform::new(scos, 0.0, (tx, ty)));
-                textures.push(src);
+                let (tx, ty) =
+                    tiles::tile_screen_xy(key.tile, tiles::TILE_SIZE, viewbox.get_offset());
+                batches[pages + tile_ref.page]
+                    .push(skia::RSXform::new(1.0, 0.0, (tx, ty)), tile_ref.rect);
             }
         }
 
@@ -1915,18 +1877,14 @@ impl TileTextureCache {
                 continue;
             }
 
-            let src = tiles::tile_atlas_content_rect(tile_ref.rect, self.slot_size);
+            let src = tile_ref.rect;
             let (tx, ty) = tiles::doc_rect_screen_xy(doc_rect, viewbox.pan, s);
             let scos = doc_rect.width() * s / src.width();
 
-            transforms.push(skia::RSXform::new(scos, 0.0, (tx, ty)));
-            textures.push(src);
+            batches[tile_ref.page].push(skia::RSXform::new(scos, 0.0, (tx, ty)), src);
         }
 
-        AtlasDrawBatch {
-            transforms,
-            textures,
-        }
+        batches
     }
 
     pub fn has(&self, tile: Tile, scale: f32) -> bool {
@@ -1945,7 +1903,7 @@ impl TileTextureCache {
         // Evict against the real slot count (`provider.length`), not the
         // hardcoded capacity — otherwise the guard never fires and the atlas
         // fills up until `allocate()` has no slot left.
-        let capacity = self.provider.length.min(TEXTURES_CACHE_CAPACITY);
+        let capacity = self.provider.length;
 
         if self.grid.len() >= capacity {
             self.gc();
@@ -1967,7 +1925,6 @@ impl TileTextureCache {
             self.removed.remove(&key);
         }
 
-        self.is_updated = true;
         tile_ref
     }
 
@@ -1989,33 +1946,19 @@ impl TileTextureCache {
         if keys.is_empty() {
             return;
         }
-        for key in keys {
-            if let Some(tile_ref) = self.grid.get(&key) {
-                if tile_ref.index < self.textures.len() {
-                    self.textures[tile_ref.index].set_empty();
-                }
-            }
-            self.removed.insert(key);
-        }
-        self.is_updated = true;
+        self.removed.extend(keys);
     }
 
     pub fn remove_at(&mut self, tile: Tile, scale: f32) {
         let key = TileCacheKey::new(tile, scale);
-        let Some(tile_ref) = self.grid.get(&key) else {
-            return;
-        };
-        if tile_ref.index < self.textures.len() {
-            self.textures[tile_ref.index].set_empty();
+        if self.grid.contains_key(&key) {
+            self.removed.insert(key);
         }
-        self.removed.insert(key);
-        self.is_updated = true;
     }
 
     pub fn clear(&mut self) {
         for k in self.grid.keys() {
             self.removed.insert(*k);
         }
-        self.is_updated = true;
     }
 }
