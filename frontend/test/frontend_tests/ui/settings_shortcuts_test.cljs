@@ -372,6 +372,25 @@
                (#'ui-shortcuts/keyboard-event->mousetrap
                 (mock-wrapped-keydown {:key "&" :code "Digit1"})))))))
 
+(t/deftest mousetrap-shift-digit-on-us-layout
+  (t/testing "US layout: Shift + 0 (code Digit0) types \")\"; recording must
+              resolve positionally to \"shift+0\" so it matches Mousetrap's
+              runtime resolution of the same physical key (a shift+0 keydown
+              types the glyph, not the digit)"
+    (with-redefs [cf/check-platform? (constantly false)]
+      (t/is (= "shift+0"
+               (#'ui-shortcuts/keyboard-event->mousetrap
+                (mock-wrapped-keydown {:key ")" :code "Digit0" :shift true})))))))
+
+(t/deftest mousetrap-shift-digit-on-azerty-layout
+  (t/testing "French AZERTY: Shift + the \"1\" key (code Digit1) types
+              \"\\\"; recording still resolves positionally to \"shift+1\"
+              regardless of the shifted glyph"
+    (with-redefs [cf/check-platform? (constantly false)]
+      (t/is (= "shift+1"
+               (#'ui-shortcuts/keyboard-event->mousetrap
+                (mock-wrapped-keydown {:key "\\" :code "Digit1" :shift true})))))))
+
 (t/deftest mousetrap-reads-code-from-unwrapped-native-event
   (t/testing "falls back to reading `code` straight off the event when it is
               not a goog.events.BrowserEvent wrapper (no getBrowserEvent)"
