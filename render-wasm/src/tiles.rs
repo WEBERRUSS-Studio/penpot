@@ -274,43 +274,20 @@ pub fn get_tile_rect(tile: Tile, scale: f32) -> skia::Rect {
     skia::Rect::from_xywh(tx, ty, ts, ts)
 }
 
-/// Physical atlas cell size so `needed_slots` fit in a square `atlas_px`
-/// texture. Never larger than `TILE_SIZE` (tiles are stored 1:1 when they
-/// fit). Smaller cells mean more slots, scaled down on blit into the atlas.
-pub fn tile_atlas_slot_size(needed_slots: usize, atlas_px: i32) -> i32 {
-    const MIN_SLOT: i32 = 64;
-    let needed = needed_slots.max(1);
-    let side = (needed as f64).sqrt().ceil() as i32;
-    let side = side.max(1);
-    (atlas_px / side).clamp(MIN_SLOT, TILE_SIZE as i32)
-}
+/// Native tiles cost `TILE_SIZE^2` pixels each, so the number of cached
+/// tiles — not the page geometry — is the memory lever. 512 slots covers the
+/// largest viewport the surface cap allows (`MAX_SURFACE_SIZE` / `TILE_SIZE`
+/// plus the interest ring) with headroom; beyond it the cache evicts instead
+/// of growing without bound.
+pub const MAX_TILE_ATLAS_SLOTS: usize = 512;
 
-/// 1px pad around packed-slot content so Linear compose does not bleed into
-/// the next cell. The drawable is written into the inner rect (full spatial
-/// coverage); sampling that inner rect avoids the edge-drop gaps of #11696.
-pub const TILE_ATLAS_SAMPLE_INSET: f32 = 1.0;
-
-/// Rect inside `slot` that holds the tile drawable (inset when packed).
-pub fn tile_atlas_content_rect(slot: skia::Rect, slot_size: i32) -> skia::Rect {
-    if slot_size < TILE_SIZE as i32 {
-        let i = TILE_ATLAS_SAMPLE_INSET;
-        skia::Rect::new(slot.left + i, slot.top + i, slot.right - i, slot.bottom - i)
-    } else {
-        slot
-    }
-}
-
-pub fn tile_atlas_compose_src_size(slot_size: i32) -> f32 {
-    tile_atlas_content_rect(
-        skia::Rect::from_wh(slot_size as f32, slot_size as f32),
-        slot_size,
-    )
-    .width()
-    .max(1.0)
-}
-
-pub fn tile_atlas_compose_scale(slot_size: i32) -> f32 {
-    TILE_SIZE / tile_atlas_compose_src_size(slot_size)
+/// Store every tile at native resolution. Additional pages, not smaller
+/// slots, cover large/HiDPI viewports and their pre-rendered interest ring.
+pub fn tile_atlas_page_count(needed_slots: usize, atlas_px: i32) -> usize {
+    let side = (atlas_px / TILE_SIZE as i32).max(1) as usize;
+    let slots_per_page = side * side;
+    let needed = needed_slots.clamp(1, MAX_TILE_ATLAS_SLOTS);
+    needed.div_ceil(slots_per_page)
 }
 
 // This structure is useful to keep all the shape uuids by shape id.
@@ -541,40 +518,36 @@ mod tests {
     }
 
     #[test]
-    fn atlas_slot_is_full_size_when_tiles_fit() {
-        assert_eq!(tile_atlas_slot_size(64, 4096), 512);
-        assert_eq!(tile_atlas_slot_size(1, 4096), 512);
+    fn atlas_page_count_covers_native_tiles_including_interest_ring() {
+        for (slots, page_px, expected) in [
+            (0, 4096, 1),
+            (1, 4096, 1),
+            (64, 4096, 1),
+            (65, 4096, 2),
+            (150, 4096, 3),
+            (441, 4096, 7),
+            (65, 2048, 5),
+            (4, 512, 4),
+        ] {
+            assert_eq!(tile_atlas_page_count(slots, page_px), expected);
+        }
     }
 
     #[test]
-    fn atlas_slot_shrinks_to_pack_interest_tiles() {
-        // 150 slots → 13×13 grid, 4096/13 = 315.
-        assert_eq!(tile_atlas_slot_size(150, 4096), 315);
-        let side = 4096 / 315;
-        assert!(side * side >= 150);
+    fn atlas_page_count_stays_within_the_slot_budget_on_small_textures() {
+        // A GPU reporting a small max texture must not multiply pages past
+        // the budget; the cache evicts instead of growing unbounded.
+        let pages = tile_atlas_page_count(4000, 1024);
+        assert_eq!(pages, MAX_TILE_ATLAS_SLOTS / 4);
     }
 
     #[test]
-    fn atlas_compose_scale_is_one_at_full_slot() {
-        assert_eq!(tile_atlas_compose_scale(512), 1.0);
-    }
-
-    #[test]
-    fn atlas_compose_scale_keeps_dest_tile_size_when_packed() {
-        let slot = 315;
-        let scale = tile_atlas_compose_scale(slot);
-        let src = tile_atlas_compose_src_size(slot);
-        assert!((scale * src - TILE_SIZE).abs() < 1e-4);
-        assert!(src < slot as f32);
-    }
-
-    #[test]
-    fn atlas_content_rect_matches_compose_src_when_packed() {
-        let slot = skia::Rect::from_xywh(10.0, 20.0, 315.0, 315.0);
-        let inner = tile_atlas_content_rect(slot, 315);
-        assert_eq!(inner, skia::Rect::new(11.0, 21.0, 324.0, 334.0));
-        assert_eq!(tile_atlas_content_rect(slot, 512), slot);
-        assert!((inner.width() - tile_atlas_compose_src_size(315)).abs() < 1e-4);
+    fn slot_budget_covers_the_largest_allowed_viewport_with_interest_ring() {
+        // `MAX_SURFACE_SIZE` (8192) is the biggest device viewport the
+        // renderer accepts; tiles are 512px and the interest ring adds 2.
+        let tiles_per_axis = 8192 / TILE_SIZE as i32;
+        let interest_slots = (tiles_per_axis + 4) * (tiles_per_axis + 4);
+        assert!((interest_slots as usize) <= MAX_TILE_ATLAS_SLOTS);
     }
 
     #[test]
