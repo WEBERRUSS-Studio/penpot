@@ -89,7 +89,9 @@
    [frontend-tests.render-wasm.serialization-test]
    [frontend-tests.render-wasm.text-editor-apply-styles-test]
    [frontend-tests.render-wasm.text-editor-caret-color-test]
+   [frontend-tests.render-wasm.text-editor-content-range-test]
    [frontend-tests.render-wasm.text-paste-test]
+   [frontend-tests.render-wasm.webgl-test]
    [frontend-tests.router-test]
    [frontend-tests.svg-fills-test]
    [frontend-tests.svg-filters-test]
@@ -238,7 +240,9 @@
    'frontend-tests.render-wasm.serialization-test
    'frontend-tests.render-wasm.text-editor-apply-styles-test
    'frontend-tests.render-wasm.text-editor-caret-color-test
+   'frontend-tests.render-wasm.text-editor-content-range-test
    'frontend-tests.render-wasm.text-paste-test
+   'frontend-tests.render-wasm.webgl-test
    'frontend-tests.router-test
    'frontend-tests.svg-fills-test
    'frontend-tests.svg-filters-test
