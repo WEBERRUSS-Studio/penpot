@@ -146,8 +146,25 @@ When zooming or panning:
 Tile caching (via `TileTextureCache`) boosts performance:
 
 - Prevents unnecessary rendering.
-- Only a limited number of tiles are kept in memory (`TEXTURES_CACHE_CAPACITY`).
+- Only a limited number of tiles is kept in memory (`MAX_TILE_ATLAS_SLOTS`).
 - Distant tiles are periodically evicted using an LRU (Least Recently Used)-like strategy based on visibility.
+
+## Atlas storage and tile resolution
+
+Cached tiles live in the *tile atlas*: GPU textures divided into fixed slots,
+one per cached tile.
+
+- A slot is always `TILE_SIZE × TILE_SIZE` device pixels. A cached tile is
+  stored at the resolution it was rendered at, so composing it back onto the
+  viewport is a 1:1 copy — no resampling of glyph edges or 1px details.
+- When the viewport (plus its interest ring) needs more slots than one texture
+  holds, the atlas grows by **adding pages** (`tile_atlas_page_count`), never
+  by shrinking slots. Pages are allocated on first use and released when the
+  viewport shrinks.
+- Composing costs one `draw_atlas` call per page that holds visible tiles, so
+  the number of draw calls stays small and bounded by the slot budget.
+- Memory is `cached tiles × TILE_SIZE²`. The slot budget is the lever; when it
+  is reached the cache evicts, it does not downsample.
 
 ## Scaling and Tile Size Utilities
 
