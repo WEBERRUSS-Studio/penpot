@@ -1235,7 +1235,7 @@ impl RenderState {
             self.render_area,
             self.get_scale(),
             self.viewbox.area,
-        );
+        )?;
 
         Ok(())
     }
