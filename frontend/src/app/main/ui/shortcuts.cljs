@@ -53,10 +53,8 @@
 ;; aren't in that map. Recording punctuation from `code` therefore matches
 ;; what Mousetrap triggers regardless of layout (e.g. the key next to Right
 ;; Shift on a US layout is always "Period", whatever glyph it types on a
-;; given ISO layout). Letters and unshifted digits must stay glyph-based to
-;; match Mousetrap's own resolution for them; shifted digits resolve
-;; positionally (to the unshifted digit, exactly as _characterFromEvent does)
-;; so that their "shift+digit" bindings match.
+;; given ISO layout). Letters/digits must stay glyph-based to match
+;; Mousetrap's own resolution for them.
 (def ^:private code-name-map
   {"Minus"        "-"
    "Equal"        "="
@@ -80,20 +78,10 @@
 
 (defn- normalize-key
   [^js event]
-  (let [key  (.-key event)
-        code (.-code (event->native event))]
+  (let [key  (.-key event)]
     (when (and key (not (contains? modifier-keys key)))
       (or (get key-name-map key)
-          (get code-name-map code)
-          ;; Shifted main-row digits resolve positionally to the unshifted
-          ;; digit ("0".."9"), matching Mousetrap's runtime resolution of the
-          ;; same physical key (see _characterFromEvent). Unshifted digits
-          ;; stay glyph-based.
-          (and (.-shiftKey event)
-               code
-               (= 6 (.length code))
-               (= 0 (.indexOf code "Digit"))
-               (.substring code 5))
+          (get code-name-map (.-code (event->native event)))
           (some-> key .toLowerCase)))))
 
 (defn- event->modifier-parts

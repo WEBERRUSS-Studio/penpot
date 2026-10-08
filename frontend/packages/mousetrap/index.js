@@ -193,19 +193,6 @@ function _characterFromEvent(e) {
     }
   }
 
-  // Shifted main-row digits resolve to the unshifted digit ("0".."9") from the
-  // physical key so that "shift+0".."shift+9" match their documented digit
-  // bindings. Those bindings carry a modifier, so Mousetrap binds them to
-  // keydown; without this, a shift+0 keydown resolves to the shifted glyph
-  // (e.g. ")") and the "shift+0" binding never matches.
-  // Gated to non-keypress events because keypress matching is character-only
-  // (it ignores modifiers) and would let the bare-digit opacity bindings fire
-  // while shift is held. Unshifted digits stay glyph-based so their existing
-  // bindings (and recording) are untouched.
-  if (e.type != "keypress" && e.shiftKey && e.code && e.code.indexOf("Digit") === 0 && e.code.length === 6) {
-    return e.code.substring(5);
-  }
-
   // for keypress events we should return the character as is
   if (e.type == "keypress") {
     var character = String.fromCharCode(e.which);
