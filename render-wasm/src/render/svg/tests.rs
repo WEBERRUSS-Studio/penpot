@@ -1,8 +1,9 @@
 use super::fixtures::*;
 
 use crate::shapes::{
-    radius_to_sigma, BlendMode, Blur, BlurType, Fill, ImageFill, ImageFillTransform, Shadow,
-    ShadowStyle, SolidColor, StrokeCap, StrokeKind,
+    radius_to_sigma, AlignContent, AlignItems, BlendMode, Blur, BlurType, Fill, FlexDirection,
+    ImageFill, ImageFillTransform, JustifyContent, JustifyItems, Shadow, ShadowStyle, SolidColor,
+    StrokeCap, StrokeKind, WrapType,
 };
 use crate::state::ShapesPool;
 use crate::uuid::Uuid;
@@ -220,6 +221,63 @@ fn exports_frame_background_blur_before_children() {
     let child_pos = svg.find(child_marker).expect("child rect size");
     assert!(fo_pos < child_pos, "frame FO must precede children: {svg}");
     insta::assert_snapshot!(svg);
+}
+
+#[test]
+fn exports_flex_children_with_first_child_on_top() {
+    let mut pool = ShapesPool::new();
+    let frame_id = uid(1);
+    let first = uid(2);
+    let second = uid(3);
+    add_frame(
+        &mut pool,
+        frame_id,
+        Uuid::nil(),
+        (0.0, 0.0, 200.0, 120.0),
+        skia::Color::from_rgb(255, 255, 255),
+        false,
+    );
+    pool.get_mut(&frame_id).unwrap().set_flex_layout_data(
+        FlexDirection::Row,
+        0.0,
+        0.0,
+        AlignItems::Start,
+        AlignContent::Start,
+        JustifyItems::Start,
+        JustifyContent::Start,
+        WrapType::NoWrap,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+    add_solid_rect(
+        &mut pool,
+        first,
+        frame_id,
+        (20.0, 20.0, 80.0, 80.0),
+        skia::Color::from_rgb(255, 0, 0),
+    );
+    add_solid_rect(
+        &mut pool,
+        second,
+        frame_id,
+        (40.0, 40.0, 100.0, 100.0),
+        skia::Color::from_rgb(0, 0, 255),
+    );
+    {
+        let frame = pool.get_mut(&frame_id).unwrap();
+        frame.add_child(first);
+        frame.add_child(second);
+    }
+
+    let svg = render(&pool, frame_id);
+    let first_pos = svg.find("fill=\"red\"").expect("first child");
+    let second_pos = svg.find("fill=\"blue\"").expect("second child");
+    assert!(
+        second_pos < first_pos,
+        "flex paints its first child on top: {svg}"
+    );
 }
 
 #[test]
@@ -3581,17 +3639,98 @@ fn group_with_empty_path(group_fills: Vec<Fill>) -> ShapesPool {
 }
 
 fn raster_png(pool: &ShapesPool, id: Uuid) -> Vec<u8> {
+    let (bytes, _, _) = raster_png_size(pool, id);
+    bytes
+}
+
+fn raster_png_size(pool: &ShapesPool, id: Uuid) -> (Vec<u8>, i32, i32) {
     let mut resources =
         crate::render::RenderResources::try_new_headless().expect("headless resources");
-    let (bytes, _, _) = crate::render::raster::render_to_raster(
+    crate::render::raster::render_to_raster(
         &mut resources,
         &id,
         pool,
         1.0,
         crate::render::raster::RasterFormat::Png,
     )
-    .expect("raster export");
-    bytes
+    .expect("raster export")
+}
+
+/// #12388: multi-element (headless) raster must include a board's own drop
+/// shadow, matching single-export sizing (spread 4 → +4px each side).
+#[test]
+fn raster_export_of_board_includes_own_drop_shadow_spread() {
+    let mut pool = ShapesPool::new();
+    let frame_id = uid(1);
+    add_frame(
+        &mut pool,
+        frame_id,
+        Uuid::nil(),
+        (0.0, 0.0, 200.0, 120.0),
+        skia::Color::from_rgb(240, 240, 240),
+        true,
+    );
+    {
+        let frame = pool.get_mut(&frame_id).unwrap();
+        frame.add_shadow(Shadow::new(
+            skia::Color::from_rgb(0, 200, 0),
+            0.0,
+            4.0,
+            (0.0, 0.0),
+            ShadowStyle::Drop,
+            false,
+        ));
+    }
+
+    let (_, width, height) = raster_png_size(&pool, frame_id);
+    assert_eq!(
+        (width, height),
+        (208, 128),
+        "board raster must grow by drop-shadow spread, not stay at selrect"
+    );
+}
+
+/// Overflowing children stay cropped; only the board's own effects expand
+/// the headless raster page (classic exporter board-box rule).
+#[test]
+fn raster_export_of_board_crops_overflowing_child_but_keeps_own_shadow() {
+    let mut pool = ShapesPool::new();
+    let frame_id = uid(1);
+    let child = uid(2);
+    add_frame(
+        &mut pool,
+        frame_id,
+        Uuid::nil(),
+        (0.0, 0.0, 200.0, 120.0),
+        skia::Color::from_rgb(240, 240, 240),
+        true,
+    );
+    {
+        let frame = pool.get_mut(&frame_id).unwrap();
+        frame.add_shadow(Shadow::new(
+            skia::Color::from_rgb(0, 200, 0),
+            0.0,
+            4.0,
+            (0.0, 0.0),
+            ShadowStyle::Drop,
+            false,
+        ));
+        frame.add_child(child);
+    }
+    add_solid_rect(
+        &mut pool,
+        child,
+        frame_id,
+        (150.0, 80.0, 280.0, 200.0),
+        skia::Color::from_rgb(255, 0, 0),
+    );
+
+    let (_, width, height) = raster_png_size(&pool, frame_id);
+    assert_eq!(
+        (width, height),
+        (208, 128),
+        "overflowing child must not grow board raster; own shadow still must"
+    );
 }
 
 #[test]
@@ -3655,4 +3794,74 @@ fn raster_export_of_child_paints_inherited_group_fill() {
     let inherited_png = raster_png(&inherited, uid(2));
     assert_eq!(inherited_png, raster_png(&own, uid(2)));
     assert_ne!(inherited_png, raster_png(&bare, uid(2)));
+}
+
+/// Reads one pixel of an encoded raster export as unpremultiplied RGBA.
+fn raster_pixel(png: &[u8], (x, y): (i32, i32)) -> skia::Color {
+    let image = skia::Image::from_encoded(skia::Data::new_copy(png)).expect("decode png");
+    let info = skia::ImageInfo::new(
+        (1, 1),
+        skia::ColorType::RGBA8888,
+        skia::AlphaType::Unpremul,
+        None,
+    );
+    let mut px = [0u8; 4];
+    assert!(image.read_pixels(
+        &info,
+        &mut px,
+        4,
+        (x, y),
+        skia::image::CachingHint::Disallow
+    ));
+    skia::Color::from_argb(px[3], px[0], px[1], px[2])
+}
+
+/// #12334: headless raster/PDF must draw a masked group's inner shadow
+/// inside the mask outline, as the GPU single export does.
+#[test]
+fn raster_export_of_masked_group_draws_inner_shadow() {
+    let mut pool = ShapesPool::new();
+    let group_id = uid(1);
+    let mask_id = uid(2);
+    let content_id = uid(3);
+    let blue = skia::Color::from_rgb(0, 63, 255);
+
+    add_masked_group(
+        &mut pool,
+        group_id,
+        Uuid::nil(),
+        (0.0, 0.0, 100.0, 100.0),
+        &[mask_id, content_id],
+    );
+    add_solid_circle(
+        &mut pool,
+        mask_id,
+        group_id,
+        (0.0, 0.0, 100.0, 100.0),
+        skia::Color::BLACK,
+    );
+    add_solid_rect(
+        &mut pool,
+        content_id,
+        group_id,
+        (0.0, 0.0, 100.0, 100.0),
+        blue,
+    );
+    pool.get_mut(&group_id).unwrap().add_shadow(Shadow::new(
+        skia::Color::BLACK,
+        0.0,
+        0.0,
+        (20.0, 0.0),
+        ShadowStyle::Inner,
+        false,
+    ));
+
+    let (png, width, height) = raster_png_size(&pool, group_id);
+    assert_eq!((width, height), (100, 100));
+
+    // Left edge: the shifted silhouette leaves a band the shadow fills.
+    assert_eq!(raster_pixel(&png, (8, 50)), skia::Color::BLACK);
+    assert_eq!(raster_pixel(&png, (50, 50)), blue);
+    // Outside the circle the mask still clears everything.
+    assert_eq!(raster_pixel(&png, (3, 3)).a(), 0);
 }
