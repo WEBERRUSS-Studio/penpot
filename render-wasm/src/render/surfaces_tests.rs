@@ -18,6 +18,91 @@ fn fill_cache(cache: &mut TileTextureCache, view: &Viewbox) -> HashMap<TileCache
 }
 
 #[test]
+fn doc_atlas_keeps_render_density_on_hidpi_viewports() {
+    // A 1440x900 viewport at dpr 2: the old cap of 1 px per doc px stored the
+    // backdrop at half the density of the tiles, and draw_atlas_to_backbuffer
+    // scaled it back up by 2. The backdrop only has to cover the viewport, so
+    // the render density fits inside the same memory budget as before.
+    let view = Rect::from_xywh(0.0, 0.0, 1440.0, 900.0);
+    let tile = Rect::from_xywh(512.0, 256.0, 512.0, 512.0);
+    let (origin, size, scale) = doc_atlas_layout(tile, view, 2.0, 8192.0);
+
+    assert!(
+        (scale - 2.0).abs() < 1e-3,
+        "atlas holds {scale} px per doc px, tiles render at 2.0"
+    );
+    assert_eq!((size.width, size.height), (2880, 1800));
+    assert!(doc_atlas_covers(origin, size, scale, view));
+}
+
+#[test]
+fn doc_atlas_needs_the_surface_cap_not_the_tile_texture_cap() {
+    // Same window, only the side limit differs. The tile texture cap (4096)
+    // forces a 2560 CSS px window at dpr 2 down to 1.6 px per doc px, which is
+    // the soft look at large window sizes. The surface cap (8192, what the
+    // canvas itself is allowed to be) keeps the render density and still fits
+    // the pixel budget.
+    let view = Rect::from_xywh(0.0, 0.0, 2560.0, 1440.0);
+    let tile = Rect::from_xywh(512.0, 512.0, 512.0, 512.0);
+
+    let (_, _, texture_cap_scale) = doc_atlas_layout(tile, view, 2.0, 4096.0);
+    let (_, size, surface_cap_scale) = doc_atlas_layout(tile, view, 2.0, 8192.0);
+
+    assert!(
+        (texture_cap_scale - 1.6).abs() < 1e-2,
+        "texture cap gives {texture_cap_scale} px per doc px"
+    );
+    assert!(
+        (surface_cap_scale - 2.0).abs() < 1e-3,
+        "surface cap gives {surface_cap_scale} px per doc px"
+    );
+
+    let pixels = (size.width as f32) * (size.height as f32);
+    assert!(size.width <= 8192 && size.height <= 8192);
+    assert!(
+        pixels <= DOC_ATLAS_MAX_PIXELS * 1.01,
+        "atlas is {pixels} px"
+    );
+}
+
+#[test]
+fn doc_atlas_follows_the_viewport_instead_of_stretching_to_far_tiles() {
+    // A tile far outside the viewport must not stretch the atlas across 120000
+    // px of document: that spends the budget on empty space and downscales the
+    // part the user looks at. The tile is refused and stays sharp in the tile
+    // cache; the window keeps the viewport at full density.
+    let view = Rect::from_xywh(0.0, 0.0, 2560.0, 1440.0);
+    let far = Rect::from_xywh(120_000.0, 90_000.0, 512.0, 512.0);
+    let (origin, size, scale) = doc_atlas_layout(far, view, 2.0, 8192.0);
+
+    assert!(!doc_atlas_covers(origin, size, scale, far));
+    assert!(doc_atlas_covers(origin, size, scale, view));
+    assert!(
+        (scale - 2.0).abs() < 1e-3,
+        "atlas density dropped to {scale}"
+    );
+
+    let pixels = (size.width as f32) * (size.height as f32);
+    assert!(
+        pixels <= DOC_ATLAS_MAX_PIXELS * 1.01,
+        "atlas is {pixels} px"
+    );
+}
+
+#[test]
+fn doc_atlas_stays_inside_the_gpu_side_limit() {
+    // A viewport larger than the texture limit: density drops to fit, and the
+    // window still covers what it drew.
+    let view = Rect::from_xywh(0.0, 0.0, 8000.0, 6000.0);
+    let tile = Rect::from_xywh(7000.0, 5000.0, 512.0, 512.0);
+    let (origin, size, scale) = doc_atlas_layout(tile, view, 2.0, 4096.0);
+
+    assert!(size.width <= 4096 && size.height <= 4096);
+    assert!(scale > 0.01 && scale <= 2.0);
+    assert!(doc_atlas_covers(origin, size, scale, tile));
+}
+
+#[test]
 fn atlas_keeps_native_resolution_beyond_one_page() {
     // 15 × 10 visible cells: the old 4096 atlas shrank these to 313px.
     let view = Viewbox::new(14.0 * 512.0, 9.0 * 512.0);

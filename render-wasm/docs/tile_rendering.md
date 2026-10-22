@@ -166,6 +166,26 @@ one per cached tile.
 - Memory is `cached tiles × TILE_SIZE²`. The slot budget is the lever; when it
   is reached the cache evicts, it does not downsample.
 
+### The document-atlas backdrop
+
+Fast-mode frames (`render_from_cache`, pan/zoom preview) draw a **doc atlas**
+first — one document-space surface — and then overlay the HQ tile textures on
+top of it. Two rules keep that backdrop sharp:
+
+- Its density (`atlas.scale`, atlas px per doc px) tracks the render density
+  `zoom * dpr`. Capping it at 1.0 stores a HiDPI viewport at half resolution,
+  and `draw_atlas_to_backbuffer` scales it back up — the whole canvas goes soft.
+- The window covers the viewport plus the tile being written, never the union of
+  everything ever rendered. A tile that does not fit at the render density is
+  refused: it stays in the tile cache, where it is sharp, instead of stretching
+  the atlas across the document and downscaling the part the user looks at.
+- When the density must rise, the previous content is dropped, not resampled.
+  Upsampling it would keep the blur for the rest of the session; dropping it
+  costs one re-render.
+
+Memory stays bounded by `DOC_ATLAS_MAX_PIXELS` (the same total as the old
+4096×4096 side cap): a 1440×900 CSS viewport at dpr 2 costs 2880×1800 atlas px.
+
 ## Scaling and Tile Size Utilities
 
 Tile size in screen space is constant, but its actual visual size depends on zoom level (`scale`).
