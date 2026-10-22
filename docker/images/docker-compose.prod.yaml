@@ -1,0 +1,210 @@
+---
+## Production stack for a Penpot built from this repository's source.
+##
+## Configure and start, from this directory:
+##   cp .env.prod.example .env.prod    # fill in domain, keys, SMTP
+##   ./start-prod.sh --build           # bundles + images, then start
+##
+## Without ./start-prod.sh: build the images first with
+##   ../../manage.sh build-bundle
+##   ./build.sh backend frontend exporter mcp --from-bundles --version fork
+## and start with
+##   docker compose -p penpot-prod \
+##     -f docker-compose.prod.yaml --env-file .env.prod up -d
+##
+## Unlike docker-compose.yaml this file publishes the frontend on the loopback
+## interface only. A reverse proxy on this host terminates TLS and forwards to
+## it (see PENPOT_HTTP_PORT). It must pass the Upgrade header for the
+## websocket endpoints, and its body size limit must reach
+## PENPOT_HTTP_MAX_BODY_SIZE, otherwise large uploads fail with 413.
+## The flags carry no `disable-secure-session-cookies` and no
+## `disable-email-verification`, so cookies need HTTPS in front and an account
+## is only usable once its address was confirmed. That needs a working SMTP:
+## without one, nobody can finish registering.
+##
+## admin-console has no Dockerfile here, so that one image comes from the
+## upstream registry (PENPOT_ADMIN_CONSOLE_VERSION in the env file).
+##
+## The two data volumes are named after the compose project, so a new project
+## starts with an empty database. To start this stack on the data of an
+## existing instance, name its volumes in the env file instead:
+##   PENPOT_POSTGRES_VOLUME=<project>_penpot_postgres_data
+##   PENPOT_ASSETS_VOLUME=<project>_penpot_assets
+## Compose then uses those exact volumes and ignores the project name for them.
+## List the candidates with: docker volume ls | grep -i penpot
+
+x-flags: &penpot-flags
+  PENPOT_FLAGS: ${PENPOT_FLAGS:-enable-smtp enable-mcp enable-admin-console}
+
+x-uri: &penpot-public-uri
+  PENPOT_PUBLIC_URI: ${PENPOT_PUBLIC_URI:?set in the env file}
+
+x-body-size: &penpot-http-body-size
+  PENPOT_HTTP_SERVER_MAX_BODY_SIZE: ${PENPOT_HTTP_MAX_BODY_SIZE:-367001600}
+
+## Master key for http sessions and invitations. Replacing it invalidates
+## every session and every pending invitation. Generate one per instance:
+##   python3 -c "import secrets; print(secrets.token_urlsafe(64))"
+x-secret-key: &penpot-secret-key
+  PENPOT_SECRET_KEY: ${PENPOT_SECRET_KEY:?set in the env file}
+
+x-database: &penpot-database
+  PENPOT_DATABASE_URI: postgresql://penpot-postgres/${DB_NAME:-penpot}
+  PENPOT_DATABASE_USERNAME: ${DB_USERNAME:-penpot}
+  PENPOT_DATABASE_PASSWORD: ${DB_PASSWORD:?set in the env file}
+
+x-smtp: &penpot-smtp
+  PENPOT_SMTP_DEFAULT_FROM: ${SMTP_FROM:?set in the env file}
+  PENPOT_SMTP_DEFAULT_REPLY_TO: ${SMTP_REPLY_TO:-${SMTP_FROM}}
+  PENPOT_SMTP_HOST: ${SMTP_HOST:?set in the env file}
+  PENPOT_SMTP_PORT: ${SMTP_PORT:-587}
+  PENPOT_SMTP_USERNAME: ${SMTP_USERNAME:-}
+  PENPOT_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  PENPOT_SMTP_TLS: ${SMTP_TLS:-true}
+  PENPOT_SMTP_SSL: ${SMTP_SSL:-false}
+
+x-telemetry: &penpot-telemetry
+  PENPOT_TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-true}
+  PENPOT_TELEMETRY_REFERER: compose
+
+networks:
+  penpot:
+
+volumes:
+  penpot_postgres_data:
+    # Empty name keeps the compose convention <project>_penpot_postgres_data.
+    name: ${PENPOT_POSTGRES_VOLUME:-}
+  penpot_assets:
+    name: ${PENPOT_ASSETS_VOLUME:-}
+
+services:
+  penpot-frontend:
+    image: penpotapp/frontend:${PENPOT_VERSION:-fork}
+    restart: always
+    expose:
+      - 8080
+    ports:
+      # Loopback only: the reverse proxy in front reaches Penpot here.
+      - 10.0.0.7:${PENPOT_HTTP_PORT:-8080}:8080
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on:
+      - penpot-backend
+      - penpot-admin-console
+      - penpot-mcp
+      - penpot-exporter
+    networks:
+      - penpot
+    environment:
+      <<: [
+        *penpot-flags, *penpot-http-body-size, *penpot-public-uri
+      ]
+
+      # Internal docker network address of the admin console.
+      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
+
+      # Set to "true" on hosts where IPv6 is disabled at kernel boot level.
+      # PENPOT_DISABLE_IPV6_LISTEN: "true"
+
+  penpot-backend:
+    image: penpotapp/backend:${PENPOT_VERSION:-fork}
+    restart: always
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on:
+      penpot-postgres:
+        condition: service_healthy
+      penpot-valkey:
+        condition: service_healthy
+    networks:
+      - penpot
+    environment:
+      <<: [
+        *penpot-flags, *penpot-public-uri, *penpot-http-body-size,
+        *penpot-secret-key, *penpot-database, *penpot-smtp, *penpot-telemetry
+      ]
+
+      # Internal docker network address of the admin console.
+      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
+
+      # Valkey carries the websocket notifications. Don't touch unless the
+      # valkey container has different parameters or a different name.
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+
+      # Assets on the shared volume. For S3, replace these two with
+      # PENPOT_OBJECTS_STORAGE_BACKEND: s3 plus the AWS_* keys and endpoint.
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+
+  penpot-admin-console:
+    image: penpotapp/admin-console:${PENPOT_ADMIN_CONSOLE_VERSION:-2.18}
+    restart: always
+    depends_on:
+      penpot-postgres:
+        condition: service_healthy
+    networks:
+      - penpot
+    environment:
+      <<: [*penpot-public-uri, *penpot-secret-key, *penpot-database]
+
+      # Internal docker network address of the frontend.
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+
+  penpot-mcp:
+    image: penpotapp/mcp:${PENPOT_VERSION:-fork}
+    restart: always
+    networks:
+      - penpot
+
+  penpot-exporter:
+    image: penpotapp/exporter:${PENPOT_VERSION:-fork}
+    restart: always
+    depends_on:
+      penpot-valkey:
+        condition: service_healthy
+    networks:
+      - penpot
+    environment:
+      <<: [*penpot-flags, *penpot-secret-key, *penpot-public-uri]
+
+      # Internal docker network address of the frontend.
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+
+      # Valkey carries the websocket notifications and the export jobs.
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+
+  penpot-postgres:
+    image: postgres:15
+    restart: always
+    stop_signal: SIGINT
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-penpot}"]
+      interval: 2s
+      timeout: 10s
+      retries: 5
+      start_period: 2s
+    volumes:
+      - penpot_postgres_data:/var/lib/postgresql/data
+    networks:
+      - penpot
+    environment:
+      - POSTGRES_INITDB_ARGS=--data-checksums
+      - POSTGRES_DB=${DB_NAME:-penpot}
+      - POSTGRES_USER=${DB_USERNAME:-penpot}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+
+  penpot-valkey:
+    image: valkey/valkey:8.1
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+    networks:
+      - penpot
+    environment:
+      # Raise the max memory size if the instance needs more.
+      - VALKEY_EXTRA_FLAGS=--maxmemory ${VALKEY_MAXMEMORY:-128mb}
+        --maxmemory-policy volatile-lfu

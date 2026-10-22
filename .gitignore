@@ -10,6 +10,7 @@
 .cpcache
 .lsp
 .env
+.env.prod
 .nrepl-port
 .nyc_output
 .rebel_readline_history
