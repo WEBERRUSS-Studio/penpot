@@ -25,7 +25,11 @@ const TILE_DRAWABLE_RECT: IRect = IRect {
     right: TILE_MARGIN_SIZE + TILE_SIZE,
     bottom: TILE_MARGIN_SIZE + TILE_SIZE,
 };
-const DOC_ATLAS_MAX_DIM: i32 = 4096;
+/// Doc atlas memory budget, in pixels. The same total memory as the old
+/// 4096x4096 side cap, but spent where it matters: at dpr 2 the atlas keeps 2
+/// device px per doc px for a viewport-sized window instead of resampling
+/// every tile down to 1 px per doc px.
+const DOC_ATLAS_MAX_PIXELS: f32 = 4096. * 4096.;
 
 /// GPU→GPU copy of `src` from `from` into `dst` on `to_canvas`, without
 /// `image_snapshot` (avoids per-tile sync stalls on WebGL).
@@ -143,15 +147,123 @@ impl TileCacheKey {
     }
 }
 
+/// True when the atlas window `[origin, origin + size/scale]` holds `doc_rect`.
+fn doc_atlas_covers(
+    origin: skia::Point,
+    size: skia::ISize,
+    scale: f32,
+    doc_rect: skia::Rect,
+) -> bool {
+    if size.width <= 0 || size.height <= 0 {
+        return false;
+    }
+    let scale = scale.max(0.01);
+    doc_rect.left >= origin.x
+        && doc_rect.top >= origin.y
+        && doc_rect.right <= origin.x + (size.width as f32) / scale
+        && doc_rect.bottom <= origin.y + (size.height as f32) / scale
+}
+
+/// Where the doc atlas sits and how dense it is.
+///
+/// `density` is the render density of the tiles written into it
+/// (`Viewbox::get_scale()` == zoom * dpr). Storing the atlas at that density
+/// keeps the composite a 1:1 copy. The old cap of 1.0 px per doc px resampled
+/// every tile on HiDPI screens and at zoom > 100%, and `draw_atlas_to_backbuffer`
+/// scaled it back up again - that is the soft look over the whole canvas.
+///
+/// A tile far outside the viewport does not stretch the window across the
+/// document: that would spend the budget on empty space and downscale the part
+/// the user looks at. The window follows the viewport and the tile is refused
+/// by `doc_atlas_covers`, so it stays in the tile cache, where it is sharp.
+fn doc_atlas_layout(
+    doc_rect: skia::Rect,
+    view_rect: skia::Rect,
+    density: f32,
+    max_side: f32,
+) -> (skia::Point, skia::ISize, f32) {
+    let density = density.max(0.01);
+    let max_side = max_side.max(tiles::TILE_SIZE);
+
+    let fit_scale = |w: f32, h: f32| -> f32 {
+        (DOC_ATLAS_MAX_PIXELS / (w * h))
+            .sqrt()
+            .min(max_side / w)
+            .min(max_side / h)
+    };
+
+    let union_w =
+        (doc_rect.right.max(view_rect.right) - doc_rect.left.min(view_rect.left)).max(1.0);
+    let union_h =
+        (doc_rect.bottom.max(view_rect.bottom) - doc_rect.top.min(view_rect.top)).max(1.0);
+
+    let (left_of, top_of, right_of, bottom_of) = if fit_scale(union_w, union_h) < density {
+        (
+            view_rect.left,
+            view_rect.top,
+            view_rect.right,
+            view_rect.bottom,
+        )
+    } else {
+        (
+            doc_rect.left.min(view_rect.left),
+            doc_rect.top.min(view_rect.top),
+            doc_rect.right.max(view_rect.right),
+            doc_rect.bottom.max(view_rect.bottom),
+        )
+    };
+
+    let (mut left, mut top, mut right, mut bottom, mut scale) = (0.0, 0.0, 0.0, 0.0, 0.0);
+
+    // Padding lowers the realloc frequency while panning, but the backdrop only
+    // ever has to cover the viewport: a padded window that can no longer afford
+    // the render density trades sharpness for a rarer realloc. Prefer density.
+    for pad in [tiles::TILE_SIZE, 0.0] {
+        let l = left_of.floor() - pad;
+        let t = top_of.floor() - pad;
+        let r = right_of.ceil() + pad;
+        let b = bottom_of.ceil() + pad;
+
+        let w = (r - l).max(1.0);
+        let h = (b - t).max(1.0);
+        let candidate = fit_scale(w, h).min(density).max(0.01);
+
+        if candidate > scale {
+            left = l;
+            top = t;
+            right = r;
+            bottom = b;
+            scale = candidate;
+        }
+
+        if scale >= density {
+            break;
+        }
+    }
+
+    let doc_w = (right - left).max(1.0);
+    let doc_h = (bottom - top).max(1.0);
+
+    let width = (doc_w * scale).ceil().clamp(1.0, max_side) as i32;
+    let height = (doc_h * scale).ceil().clamp(1.0, max_side) as i32;
+
+    (
+        skia::Point::new(left, top),
+        skia::ISize::new(width, height),
+        scale,
+    )
+}
+
 pub struct DocAtlas {
-    // Persistent 1:1 document-space atlas that gets incrementally updated as tiles render.
-    // It grows dynamically to include any rendered document rect.
+    // Document-space backdrop that gets incrementally updated as tiles render.
+    // Its window follows the viewport (see doc_atlas_layout), not the union of
+    // everything ever rendered.
     pub surface: skia::Surface,
     pub origin: skia::Point,
     pub size: skia::ISize,
-    /// Atlas pixel density relative to document pixels (1.0 == 1:1 doc px).
-    /// When the atlas would exceed `max_texture_size`, this value is
-    /// reduced so the atlas stays within the fixed texture cap.
+    /// Atlas pixels per document pixel. It tracks the render density
+    /// (`zoom * dpr`) so the composite stays a 1:1 copy, and drops to that
+    /// value only when the pixel budget or the GPU side limit forces it.
     pub scale: f32,
     /// Optional document-space bounds (1 unit == 1 doc px @ 100% zoom) used to
     /// clamp atlas writes/clears so the atlas doesn't grow due to outlier tile rects.
@@ -190,6 +302,21 @@ impl DocAtlas {
         self.tile_doc_rects.clear();
     }
 
+    /// Current atlas bounds in document space.
+    fn doc_window_rect(&self) -> skia::Rect {
+        let scale = self.scale.max(0.01);
+        skia::Rect::from_ltrb(
+            self.origin.x,
+            self.origin.y,
+            self.origin.x + (self.size.width as f32) / scale,
+            self.origin.y + (self.size.height as f32) / scale,
+        )
+    }
+
+    fn covers(&self, doc_rect: skia::Rect) -> bool {
+        doc_atlas_covers(self.origin, self.size, self.scale, doc_rect)
+    }
+
     /// Sets the document-space bounds used to clamp atlas updates.
     /// Pass `None` to disable clamping.
     pub fn set_doc_bounds(&mut self, bounds: Option<skia::Rect>) {
@@ -212,84 +339,49 @@ impl DocAtlas {
         }
     }
 
+    /// Resizes/re-anchors the atlas so it holds `doc_rect`.
+    /// Returns whether the atlas covers that rect afterwards: a `false` means
+    /// the rect lies outside the window the budget allows, and the caller must
+    /// not write it (a partial copy would place it at wrong density).
     fn ensure_atlas_contains(
         &mut self,
         gpu_state: &mut GpuState,
         doc_rect: skia::Rect,
-    ) -> Result<()> {
-        if doc_rect.is_empty() {
-            return Ok(());
+        density: f32,
+        view_rect: skia::Rect,
+    ) -> bool {
+        if doc_rect.is_empty() || self.covers(doc_rect) {
+            return self.covers(doc_rect);
         }
 
-        // Current atlas bounds in document space (1 unit == 1 px).
-        let current_left = self.origin.x;
-        let current_top = self.origin.y;
-        let scale = self.scale.max(0.01);
-        let current_right = current_left + (self.size.width as f32) / scale;
-        let current_bottom = current_top + (self.size.height as f32) / scale;
+        // The doc atlas is a surface like the canvas, so the surface cap
+        // applies here, not the tile texture cap: max_texture_size() is capped
+        // at 4096, which drops the atlas below the render density for any
+        // window wider than 2048 CSS px at dpr 2. DOC_ATLAS_MAX_PIXELS still
+        // bounds the memory - the shape may be wide, the area may not grow.
+        let max_side = gpu_state.max_surface_size() as f32;
+        let (origin, size, new_scale) = doc_atlas_layout(doc_rect, view_rect, density, max_side);
 
-        let mut new_left = current_left;
-        let mut new_top = current_top;
-        let mut new_right = current_right;
-        let mut new_bottom = current_bottom;
-
-        // If atlas is empty/uninitialized, seed to rect (expanded to tile boundaries for fewer reallocs).
-        let needs_init = self.size.width <= 0 || self.size.height <= 0;
-        if needs_init {
-            new_left = doc_rect.left.floor();
-            new_top = doc_rect.top.floor();
-            new_right = doc_rect.right.ceil();
-            new_bottom = doc_rect.bottom.ceil();
-        } else {
-            new_left = new_left.min(doc_rect.left.floor());
-            new_top = new_top.min(doc_rect.top.floor());
-            new_right = new_right.max(doc_rect.right.ceil());
-            new_bottom = new_bottom.max(doc_rect.bottom.ceil());
+        if !doc_atlas_covers(origin, size, new_scale, doc_rect) {
+            return false;
         }
 
-        // Add padding to reduce realloc frequency.
-        let pad = tiles::TILE_SIZE;
-        new_left -= pad;
-        new_top -= pad;
-        new_right += pad;
-        new_bottom += pad;
-
-        let doc_w = (new_right - new_left).max(1.0);
-        let doc_h = (new_bottom - new_top).max(1.0);
-
-        // Compute atlas scale needed to fit within the fixed texture cap.
-        // Keep the highest possible scale (closest to 1.0) that still fits.
-        let cap = gpu_state
-            .max_texture_size()
-            .clamp(TILE_SIZE, DOC_ATLAS_MAX_DIM) as f32;
-
-        let required_scale = (cap / doc_w).min(cap / doc_h).clamp(0.01, 1.0);
-
-        // Never upscale the atlas (it would add blur and churn).
-        let new_scale = self.scale.min(required_scale).max(0.01);
-
-        let new_w = (doc_w * new_scale).ceil().clamp(1.0, cap) as i32;
-        let new_h = (doc_h * new_scale).ceil().clamp(1.0, cap) as i32;
-
-        // Fast path: existing atlas already contains the rect.
-        if !needs_init
-            && doc_rect.left >= current_left
-            && doc_rect.top >= current_top
-            && doc_rect.right <= current_right
-            && doc_rect.bottom <= current_bottom
-        {
-            return Ok(());
-        }
-
-        let mut new_surface = gpu_state.create_surface_with_dimensions(new_w, new_h)?;
+        let mut new_surface =
+            match gpu_state.create_surface_with_dimensions(size.width, size.height) {
+                Ok(surface) => surface,
+                Err(_) => return false,
+            };
         new_surface.canvas().clear(skia::Color::TRANSPARENT);
 
-        // Copy old atlas into the new one with offset.
-        if !needs_init {
-            let old_scale = self.scale.max(0.01);
+        // Carry the old content over only when that does not resample it. At a
+        // higher density the old pixels are too coarse: dropping them costs one
+        // re-render and stays sharp, copying them would keep the blur for the
+        // rest of the session.
+        let old_scale = self.scale.max(0.01);
+        if !self.is_empty() && new_scale <= old_scale + f32::EPSILON {
             let scale_ratio = new_scale / old_scale;
-            let dx = (current_left - new_left) * new_scale;
-            let dy = (current_top - new_top) * new_scale;
+            let dx = (self.origin.x - origin.x) * new_scale;
+            let dy = (self.origin.y - origin.y) * new_scale;
 
             let image = self.surface.image_snapshot();
             let src =
@@ -308,15 +400,16 @@ impl DocAtlas {
             );
         }
 
-        self.origin = skia::Point::new(new_left, new_top);
-        self.size = skia::ISize::new(new_w, new_h);
+        self.origin = origin;
+        self.size = size;
         self.scale = new_scale;
         self.surface = new_surface;
-        Ok(())
+        true
     }
 
     /// Blit a Current-surface drawable rect into the doc atlas without
     /// `image_snapshot` (GPU→GPU draw; avoids per-tile sync stalls).
+    #[allow(clippy::too_many_arguments)]
     fn blit_current_drawable_into_atlas(
         &mut self,
         gpu_state: &mut GpuState,
@@ -324,6 +417,8 @@ impl DocAtlas {
         drawable_src: skia::Rect,
         tile_doc_rect: skia::Rect,
         sampling: skia::SamplingOptions,
+        density: f32,
+        view_doc: skia::Rect,
     ) -> Result<()> {
         if tile_doc_rect.is_empty() || drawable_src.is_empty() {
             return Ok(());
@@ -339,7 +434,9 @@ impl DocAtlas {
             return Ok(());
         }
 
-        self.ensure_atlas_contains(gpu_state, clipped_doc_rect)?;
+        if !self.ensure_atlas_contains(gpu_state, clipped_doc_rect, density, view_doc) {
+            return Ok(());
+        }
 
         let dst = skia::Rect::from_xywh(
             (clipped_doc_rect.left - self.origin.x) * self.scale,
@@ -425,7 +522,10 @@ impl DocAtlas {
             return Ok(());
         }
 
-        self.ensure_atlas_contains(gpu_state, doc_rect)?;
+        let view_rect = self.doc_window_rect();
+        if !self.ensure_atlas_contains(gpu_state, doc_rect, self.scale, view_rect) {
+            return Ok(());
+        }
 
         // Destination is document-space rect mapped into atlas pixel coords.
         let dst = skia::Rect::from_xywh(
@@ -1295,6 +1395,8 @@ impl Surfaces {
             src,
             tile_doc_rect,
             sampling,
+            scale,
+            view_doc,
         );
         let key = TileCacheKey::new(*tile, scale);
         self.atlas.tile_doc_rects.insert(key, tile_doc_rect);
