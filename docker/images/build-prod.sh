@@ -23,6 +23,11 @@
 #   --dry-run          print the commands, change nothing
 #   -h, --help         this text
 #
+# The frontend bundle carries the renderer as a prebuilt artifact: no step in
+# this path compiles Rust, so the wasm that sits in the frontend tree decides
+# what the image renders with. The script reports that artifact and warns when
+# it is older than the renderer source or a debug build.
+#
 # A bundle carries the version of the tree it came from (git describe), and
 # this script prints that version for every image it builds, so a bundle of an
 # older tree is visible before it becomes an image. A build is not a rollout:
@@ -139,6 +144,48 @@ tags=()
 for image in "${IMAGES[@]}"; do tags+=("$NAMESPACE/$image:$VERSION"); done
 echo "$SELF: images: ${tags[*]}" >&2
 echo "$SELF: the running stack is untouched by this build" >&2
+
+# The renderer is a build input this path never rebuilds: manage.sh
+# build-frontend-bundle runs shadow-cljs, which copies the wasm out of the
+# frontend tree. Neither the bundle version nor the image tag describes it.
+wasm_report() {
+	local wasm=$REPO/frontend/resources/public/js/render-wasm.wasm
+	local newer stale debug
+
+	if [ ! -f "$wasm" ]; then
+		echo "$SELF: no renderer artifact at ${wasm#"$REPO"/}" >&2
+		echo "  build it: (cd render-wasm && ./build frontend)" >&2
+		return
+	fi
+
+	printf '%s: renderer artifact: %s  %s B  %s  md5 %s\n' "$SELF" \
+		"${wasm#"$REPO"/}" "$(stat -c%s "$wasm")" \
+		"$(date -r "$wasm" '+%F %H:%M')" "$(md5sum "$wasm" | cut -c1-8)" >&2
+
+	newer=$(find "$REPO/render-wasm/src" "$REPO/render-wasm/Cargo.toml" -type f \
+		-newer "$wasm" -print -quit 2>/dev/null || true)
+	stale=0
+	[ -n "$newer" ] && stale=1
+
+	debug=0
+	grep -aqm1 '.debug_info' "$wasm" && debug=1
+
+	if [ "$stale" = 1 ]; then
+		echo "$SELF: warning: render-wasm source is newer than that artifact," >&2
+		echo "  the image renders with the older renderer, for example ${newer#"$REPO"/}" >&2
+	fi
+	if [ "$debug" = 1 ]; then
+		echo "$SELF: warning: that artifact is a debug build: the prod image" >&2
+		echo "  ships an unoptimized module, several times larger than needed" >&2
+	fi
+	if [ "$stale" = 1 ] || [ "$debug" = 1 ]; then
+		echo "  release renderer: (cd render-wasm && NODE_ENV=production ./build frontend)" >&2
+	fi
+}
+
+for image in "${IMAGES[@]}"; do
+	[ "$image" = frontend ] && wasm_report
+done
 
 if [ "$BUNDLES" = 1 ]; then
 	for image in "${IMAGES[@]}"; do
