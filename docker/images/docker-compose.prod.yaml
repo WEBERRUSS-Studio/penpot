@@ -1,4 +1,6 @@
 ---
+## FORK ONLY (WEBERRUSS-Studio) -- never PR these files to penpot/penpot.
+##
 ## Production stack for a Penpot built from this repository's source.
 ##
 ## Configure and start, from this directory:
@@ -23,7 +25,11 @@
 ## without one, nobody can finish registering.
 ##
 ## admin-console has no Dockerfile here, so that one image comes from the
-## upstream registry (PENPOT_ADMIN_CONSOLE_VERSION in the env file).
+## upstream registry (PENPOT_ADMIN_CONSOLE_VERSION in the env file). The four
+## locally built images take PENPOT_DOCKER_NAMESPACE, which makes a build from
+## this repository tellable from an upstream image by its name alone:
+## PENPOT_DOCKER_NAMESPACE=fork runs fork/frontend:<tag>, while the admin
+## console stays penpotapp/admin-console whatever the namespace is.
 ##
 ## The two data volumes are named after the compose project, so a new project
 ## starts with an empty database. To start this stack on the data of an
@@ -79,13 +85,16 @@ volumes:
 
 services:
   penpot-frontend:
-    image: penpotapp/frontend:${PENPOT_VERSION:-fork}
+    image: >-
+      ${PENPOT_DOCKER_NAMESPACE:-penpotapp}/frontend:${PENPOT_VERSION:-fork}
     restart: always
     expose:
       - 8080
     ports:
       # Loopback only: the reverse proxy in front reaches Penpot here.
-      - 10.0.0.7:${PENPOT_HTTP_PORT:-8080}:8080
+      # PENPOT_BIND_ADDR names the interface to publish on: 127.0.0.1 when the
+      # proxy runs on this host, the machine address when it does not.
+      - ${PENPOT_BIND_ADDR:-10.0.0.7}:${PENPOT_HTTP_PORT:-8080}:8080
     volumes:
       - penpot_assets:/opt/data/assets
     depends_on:
@@ -107,7 +116,8 @@ services:
       # PENPOT_DISABLE_IPV6_LISTEN: "true"
 
   penpot-backend:
-    image: penpotapp/backend:${PENPOT_VERSION:-fork}
+    image: >-
+      ${PENPOT_DOCKER_NAMESPACE:-penpotapp}/backend:${PENPOT_VERSION:-fork}
     restart: always
     volumes:
       - penpot_assets:/opt/data/assets
@@ -151,13 +161,15 @@ services:
       PENPOT_INTERNAL_URI: http://penpot-frontend:8080
 
   penpot-mcp:
-    image: penpotapp/mcp:${PENPOT_VERSION:-fork}
+    image: >-
+      ${PENPOT_DOCKER_NAMESPACE:-penpotapp}/mcp:${PENPOT_VERSION:-fork}
     restart: always
     networks:
       - penpot
 
   penpot-exporter:
-    image: penpotapp/exporter:${PENPOT_VERSION:-fork}
+    image: >-
+      ${PENPOT_DOCKER_NAMESPACE:-penpotapp}/exporter:${PENPOT_VERSION:-fork}
     restart: always
     depends_on:
       penpot-valkey:

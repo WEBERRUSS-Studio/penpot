@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# FORK ONLY (WEBERRUSS-Studio) -- never PR these files to penpot/penpot.
 #
 # Start the production stack of docker-compose.prod.yaml with the images that
 # were built from this repository by ./build.sh.
@@ -18,6 +19,8 @@
 #                      and the four images). Not docker compose --build: this
 #                      compose file has no build sections.
 #   --version <tag>    image tag to start       (default: PENPOT_VERSION, fork)
+#   --namespace <org>  image namespace     (default: PENPOT_DOCKER_NAMESPACE
+#                      from the env file, else penpotapp)
 #   --env-file <file>  env file                (default: .env.prod)
 #   --project <name>   compose project name    (default: penpot-prod)
 #   --no-check         skip the env file and image checks
@@ -44,7 +47,7 @@ usage() {
 COMPOSE_FILE=docker-compose.prod.yaml
 ENV_FILE=${PENPOT_PROD_ENV_FILE:-.env.prod}
 PROJECT=${PENPOT_PROD_PROJECT:-penpot-prod}
-NAMESPACE=${PENPOT_DOCKER_NAMESPACE:-penpotapp}
+NAMESPACE=${PENPOT_DOCKER_NAMESPACE:-}
 VERSION=${PENPOT_BUILD_VERSION:-}
 BUILD=0
 CHECK=1
@@ -62,6 +65,10 @@ while [ $# -gt 0 ]; do
 		;;
 	--version)
 		VERSION=${2:?--version needs a value}
+		shift
+		;;
+	--namespace)
+		NAMESPACE=${2:?--namespace needs a value}
 		shift
 		;;
 	--env-file)
@@ -110,6 +117,13 @@ if [ -z "$VERSION" ]; then
 	VERSION=$(env_value PENPOT_VERSION)
 fi
 VERSION=${VERSION:-fork}
+
+# Namespace and version arrive from the same place, so the image this script
+# checks and the image the compose file starts cannot drift apart.
+if [ -z "$NAMESPACE" ]; then
+	NAMESPACE=$(env_value PENPOT_DOCKER_NAMESPACE)
+fi
+NAMESPACE=${NAMESPACE:-penpotapp}
 
 # The data volumes. The env file can name existing ones; without it compose
 # falls back to the <project>_<volume> convention, which this script mirrors
@@ -249,7 +263,7 @@ fi
 
 dry_run_note=""
 [ "$DRY_RUN" = 1 ] && dry_run_note="dry-run "
-echo "$SELF: ${dry_run_note}project=$PROJECT version=$VERSION env=$ENV_FILE" >&2
+echo "$SELF: ${dry_run_note}project=$PROJECT images=$NAMESPACE/$VERSION env=$ENV_FILE" >&2
 echo "$SELF: data: postgres=$PG_VOLUME assets=$ASSETS_VOLUME" >&2
 
 # An http public URI is fine, but only with the flag that drops the

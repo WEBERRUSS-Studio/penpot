@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# FORK ONLY (WEBERRUSS-Studio) -- never PR these files to penpot/penpot.
 #
 # Stop and remove the production stack of docker-compose.prod.yaml. The data
 # volumes stay: a plain run leaves the database and the uploaded assets on

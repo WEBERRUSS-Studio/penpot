@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# FORK ONLY (WEBERRUSS-Studio) -- never PR these files to penpot/penpot.
 #
 # Build the images of docker-compose.prod.yaml from this working tree: first
 # the module bundles (../../manage.sh build-<image>-bundle), then the images
@@ -17,7 +18,8 @@
 #   --version <tag>    image tag, the one compose picks by default
 #                      (default: PENPOT_VERSION from the env file, else fork)
 #   --env-file <file>  env file to read PENPOT_VERSION from (default: .env.prod)
-#   --namespace <org>  image namespace           (default: penpotapp)
+#   --namespace <org>  image namespace           (default: the env file's
+#                      PENPOT_DOCKER_NAMESPACE, else penpotapp)
 #   --project <name>   compose project, used only to name the running
 #                      containers still on the previous image (penpot-prod)
 #   --dry-run          print the commands, change nothing
@@ -54,7 +56,7 @@ usage() {
 DEFAULT_IMAGES=(frontend backend exporter mcp)
 
 IMAGES=()
-NAMESPACE=${PENPOT_DOCKER_NAMESPACE:-penpotapp}
+NAMESPACE=${PENPOT_DOCKER_NAMESPACE:-}
 VERSION=${PENPOT_BUILD_VERSION:-}
 ENV_FILE=${PENPOT_PROD_ENV_FILE:-.env.prod}
 PROJECT=${PENPOT_PROD_PROJECT:-penpot-prod}
@@ -122,6 +124,14 @@ if [ -z "$VERSION" ]; then
 	VERSION=$(env_value PENPOT_VERSION)
 fi
 VERSION=${VERSION:-fork}
+
+# The namespace is what tells a locally built image from an upstream one, so it
+# lives in the same env file as the version. Same precedence: option, env file,
+# default.
+if [ -z "$NAMESPACE" ]; then
+	NAMESPACE=$(env_value PENPOT_DOCKER_NAMESPACE)
+fi
+NAMESPACE=${NAMESPACE:-penpotapp}
 
 # The version manage.sh writes into every bundle, so the tree this build reads
 # and the bundle that results from it are comparable.
