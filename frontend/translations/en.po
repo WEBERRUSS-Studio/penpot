@@ -2153,6 +2153,10 @@ msgstr "This file is not a valid shortcuts export."
 msgid "import-shortcuts.no-changes"
 msgstr "No differences found between the current and imported shortcuts."
 
+#: src/app/main/ui/settings/import_shortcuts_diff_modal.cljs:153
+msgid "import-shortcuts.skipped-entries"
+msgstr "These entries can't be imported: they don't match any Penpot shortcut or use a reserved key combination."
+
 #: src/app/main/ui/components/color_input.cljs:31
 msgid "inspect.attributes.color"
 msgstr "Color"
@@ -4777,10 +4781,6 @@ msgstr "Select items using this style"
 msgid "shortcuts.add-comment"
 msgstr "Comments"
 
-#: src/app/main/data/workspace/path/shortcuts.cljs:61
-msgid "shortcuts.add-node"
-msgstr "Add node"
-
 #: src/app/main/data/workspace/shortcuts.cljs:532
 msgid "shortcuts.align-bottom"
 msgstr "Align bottom"
@@ -4957,6 +4957,10 @@ msgstr "Edit %s"
 msgid "shortcuts.edit-modal.conflict"
 msgstr "Already assigned to \"%s\". Saving will move it to this action."
 
+#: src/app/main/ui/shortcuts.cljs:836
+msgid "shortcuts.edit-modal.reserved"
+msgstr "This combination is reserved by Penpot and can't be assigned."
+
 #: src/app/main/ui/shortcuts.cljs:636
 msgid "shortcuts.edit-modal.reset-pending"
 msgstr "Saving will reset this shortcut to default:"
@@ -5052,13 +5056,6 @@ msgstr "Join nodes"
 #: src/app/main/ui/shortcuts.cljs:624
 msgid "shortcuts.key-combo"
 msgstr "Press the new keys"
-
-#: src/app/main/ui/settings/shortcuts.cljs:484
-msgid "shortcuts.layout-map-missing"
-msgstr ""
-"This browser does not expose the keyboard layout, so shortcuts that "
-"combine Shift with punctuation (for example Shift+,) may not work here. "
-"They keep working in Chromium browsers."
 
 #: src/app/main/data/workspace/text/shortcuts.cljs:249
 msgid "shortcuts.line-through"
@@ -7008,6 +7005,12 @@ msgstr "UPDATES"
 #: src/app/main/ui/ds/notifications/shared/notification_pill.cljs:61
 msgid "workspace.notification-pill.detail"
 msgstr "Details"
+
+#: src/app/main/data/workspace/notifications.cljs:282
+msgid "workspace.notifications.file-repaired"
+msgstr ""
+"We fixed some issues in this file. You can find a copy of the original version in "
+"the version history."
 
 #: src/app/main/ui/workspace/sidebar/options/menus/interactions.cljs:784
 msgid "workspace.options.add-interaction"

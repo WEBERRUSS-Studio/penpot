@@ -2346,6 +2346,61 @@
     (t/is (nil? (:error out)))
     (check-tokens-absorbed prepared)))
 
+(t/deftest unpublishing-a-library-keeps-its-consumers-readable
+  ;; The test helpers enable all supported features, so these files use
+  ;; fdata/pointer-map and the absorbed page is stored as a fragment
+  (let [profile  (th/create-profile* 1 {:is-active true})
+        library  (th/create-file* 1 {:profile-id (:id profile)
+                                     :project-id (:default-project-id profile)
+                                     :is-shared true})
+        consumer (th/create-file* 2 {:profile-id (:id profile)
+                                     :project-id (:default-project-id profile)
+                                     :is-shared false})
+        _        (th/link-file-to-library* {:file-id (:id consumer) :library-id (:id library)})
+        color-id (uuid/random)
+        page-id  (first (get-in consumer [:data :pages]))
+        shape-id (uuid/random)]
+
+    (update-file! :file-id (:id library)
+                  :profile-id (:id profile)
+                  :revn 0
+                  :changes [{:type :add-color
+                             :color {:id color-id :name "Brand" :color "#abcdef" :opacity 1}}])
+    (update-file!
+     :file-id (:id consumer)
+     :profile-id (:id profile)
+     :revn 0
+     :changes
+     [{:type :add-obj
+       :page-id page-id
+       :id shape-id
+       :parent-id uuid/zero
+       :frame-id uuid/zero
+       :components-v2 true
+       :obj (cts/setup-shape {:id shape-id :name "Rect" :frame-id uuid/zero
+                              :parent-id uuid/zero :type :rect
+                              :fills [{:fill-color "#abcdef"
+                                       :fill-opacity 1
+                                       :fill-color-ref-id color-id
+                                       :fill-color-ref-file (:id library)}]})}])
+
+    (let [out (th/command! {::th/type :set-file-shared
+                            ::rpc/profile-id (:id profile)
+                            :id (:id library)
+                            :is-shared false})]
+      (t/is (nil? (:error out))))
+
+    ;; The absorption changed the page of the shape: the consumer reads
+    ;; it back, with the fill now linked to its own color
+    (let [out  (th/command! {::th/type :get-file
+                             ::rpc/profile-id (:id profile)
+                             :id (:id consumer)})
+          data (-> out :result :data)
+          fill (get-in data [:pages-index page-id :objects shape-id :fills 0])]
+      (t/is (nil? (:error out)))
+      (t/is (contains? (:colors data) color-id))
+      (t/is (= (:id consumer) (:fill-color-ref-file fill))))))
+
 (t/deftest deleted-files-permanently-delete
   (let [prof    (th/create-profile* 1 {:is-active true})
         team-id (:default-team-id prof)
@@ -3119,3 +3174,23 @@
              (get-in (meta (:result out)) [:app.loggers.audit/props :id])))
     (t/is (= (:id team)
              (get-in (meta (:result out)) [:app.loggers.audit/props :team-id])))))
+
+(t/deftest get-team-shared-files-skips-files-that-fail-to-load
+  (let [profile  (th/create-profile* 1)
+        file1    (th/create-file* 1 {:profile-id (:id profile)
+                                     :project-id (:default-project-id profile)
+                                     :is-shared true})
+        file2    (th/create-file* 2 {:profile-id (:id profile)
+                                     :project-id (:default-project-id profile)
+                                     :is-shared true})
+        get-file (deref #'files/get-file-with-summary)
+        broken   (fn [cfg id]
+                   (if (= id (:id file1))
+                     (throw (ex-info "broken file" {:type :assertion}))
+                     (get-file cfg id)))
+        out      (with-redefs-fn {#'files/get-file-with-summary broken}
+                   #(th/command! {::th/type :get-team-shared-files
+                                  ::rpc/profile-id (:id profile)
+                                  :team-id (:default-team-id profile)}))]
+    (t/is (th/success? out))
+    (t/is (= #{(:id file2)} (into #{} (map :id) (:result out))))))

@@ -39,6 +39,7 @@
    [frontend-tests.data.workspace-shortcuts-test]
    [frontend-tests.data.workspace-texts-test]
    [frontend-tests.data.workspace-thumbnails-test]
+   [frontend-tests.data.workspace-variant-rename-test]
    [frontend-tests.data.workspace-versions-test]
    [frontend-tests.debug-logging-test]
    [frontend-tests.errors-governor-test]
@@ -47,6 +48,7 @@
    [frontend-tests.helpers-shapes-test]
    [frontend-tests.logic.bool-move-test]
    [frontend-tests.logic.comp-remove-swap-slots-test]
+   [frontend-tests.logic.comp-watcher-test]
    [frontend-tests.logic.components-and-tokens]
    [frontend-tests.logic.copy-paste-typography-test]
    [frontend-tests.logic.copying-and-duplicating-test]
@@ -105,6 +107,7 @@
    [frontend-tests.tokens.logic.token-actions-test]
    [frontend-tests.tokens.logic.token-data-test]
    [frontend-tests.tokens.logic.token-remapping-test]
+   [frontend-tests.tokens.logic.tokens-source-test]
    [frontend-tests.tokens.logic.tokens-status-test]
    [frontend-tests.tokens.referenced-token-value-test]
    [frontend-tests.tokens.style-dictionary-test]
@@ -142,6 +145,7 @@
    [frontend-tests.ui.text-attrs-multiple-test]
    [frontend-tests.ui.workspace-libraries-test]
    [frontend-tests.util-clipboard-test]
+   [frontend-tests.util-http-test]
    [frontend-tests.util-object-test]
    [frontend-tests.util-queue-test]
    [frontend-tests.util-range-tree-test]
@@ -200,6 +204,7 @@
    'frontend-tests.data.workspace-shortcuts-test
    'frontend-tests.data.workspace-texts-test
    'frontend-tests.data.workspace-thumbnails-test
+   'frontend-tests.data.workspace-variant-rename-test
    'frontend-tests.data.workspace-versions-test
    'frontend-tests.debug-logging-test
    'frontend-tests.errors-governor-test
@@ -208,6 +213,7 @@
    'frontend-tests.helpers-shapes-test
    'frontend-tests.logic.bool-move-test
    'frontend-tests.logic.comp-remove-swap-slots-test
+   'frontend-tests.logic.comp-watcher-test
    'frontend-tests.logic.components-and-tokens
    'frontend-tests.logic.copy-paste-typography-test
    'frontend-tests.logic.copying-and-duplicating-test
@@ -269,6 +275,7 @@
    'frontend-tests.tokens.style-dictionary-test
    'frontend-tests.tokens.token-errors-test
    'frontend-tests.tokens.token-path-test
+   'frontend-tests.tokens.logic.tokens-source-test
    'frontend-tests.tokens.logic.tokens-status-test
    'frontend-tests.tokens.workspace-tokens-remap-test
    'frontend-tests.ui.check-updates-test
@@ -304,6 +311,7 @@
    'frontend-tests.ui.text-attrs-multiple-test
    'frontend-tests.ui.workspace-libraries-test
    'frontend-tests.util-clipboard-test
+   'frontend-tests.util-http-test
    'frontend-tests.util-object-test
    'frontend-tests.util-queue-test
    'frontend-tests.util-range-tree-test

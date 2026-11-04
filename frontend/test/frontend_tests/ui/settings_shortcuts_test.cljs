@@ -1,8 +1,13 @@
 (ns frontend-tests.ui.settings-shortcuts-test
   (:require
+   ["@penpot/mousetrap$default" :as mousetrap]
    [app.config :as cf]
+   [app.main.data.dashboard.shortcuts :as dsc]
    [app.main.data.profile :as du]
    [app.main.data.shortcuts :as ds]
+   [app.main.data.viewer.shortcuts :as vsc]
+   [app.main.data.workspace.path.shortcuts :as psc]
+   [app.main.data.workspace.shortcuts :as wsc]
    [app.main.ui.settings.import-shortcuts-diff-modal :as diff-modal]
    [app.main.ui.settings.restore-shortcuts-modal :as restore-modal]
    [app.main.ui.settings.shortcuts :as sut]
@@ -14,21 +19,21 @@
 (t/deftest validate-imported-shortcuts-accepts-valid-workspace
   (t/is (= {:valid? true}
            (sut/validate-imported-shortcuts
-            {:workspace {:escape "escape"
+            {:workspace {:draw-rect "shift+r"
                          :increase-zoom "+"
                          :zoom-lense-decrease "alt+z"}}))))
 
 (t/deftest validate-imported-shortcuts-accepts-optional-contexts
   (t/is (= {:valid? true}
            (sut/validate-imported-shortcuts
-            {:workspace {:escape "escape"}
+            {:workspace {:draw-rect "shift+r"}
              :dashboard {:toggle-theme "alt+m"}
              :viewer {:next-frame "right"}}))))
 
 (t/deftest validate-imported-shortcuts-accepts-empty-string-command
   (t/is (= {:valid? true}
            (sut/validate-imported-shortcuts
-            {:workspace {:escape ""}}))))
+            {:workspace {:draw-rect ""}}))))
 
 (t/deftest validate-imported-shortcuts-rejects-nil
   (let [result (sut/validate-imported-shortcuts nil)]
@@ -52,19 +57,19 @@
     (t/is (some #(= "workspace" (:path %)) (:errors result)))))
 
 (t/deftest validate-imported-shortcuts-rejects-non-string-command
-  (let [result (sut/validate-imported-shortcuts {:workspace {:escape 123}})]
+  (let [result (sut/validate-imported-shortcuts {:workspace {:draw-rect 123}})]
     (t/is (= false (:valid? result)))
     (t/is (seq (:errors result)))
-    (t/is (some #(= "workspace/escape" (:path %)) (:errors result)))))
+    (t/is (some #(= "workspace/draw-rect" (:path %)) (:errors result)))))
 
 (t/deftest validate-imported-shortcuts-rejects-vector-command
-  (let [result (sut/validate-imported-shortcuts {:workspace {:escape ["ctrl+e"]}})]
+  (let [result (sut/validate-imported-shortcuts {:workspace {:draw-rect ["ctrl+e"]}})]
     (t/is (= false (:valid? result)))
     (t/is (seq (:errors result)))
-    (t/is (some #(= "workspace/escape" (:path %)) (:errors result)))))
+    (t/is (some #(= "workspace/draw-rect" (:path %)) (:errors result)))))
 
 (t/deftest validate-imported-shortcuts-rejects-unknown-top-level-key
-  (let [result (sut/validate-imported-shortcuts {:workspace {:escape "escape"}
+  (let [result (sut/validate-imported-shortcuts {:workspace {:draw-rect "shift+r"}
                                                  :unknown-context {}})]
     (t/is (= false (:valid? result)))
     (t/is (seq (:errors result)))
@@ -86,6 +91,195 @@
   (t/is (= false (:valid? (sut/validate-imported-shortcuts (js/Date.)))))
   (t/is (= false (:valid? (sut/validate-imported-shortcuts #{:workspace}))))
   (t/is (= false (:valid? (sut/validate-imported-shortcuts (fn []))))))
+
+(t/deftest sanitize-imported-shortcuts-skips-unknown-action-keys
+  (t/is (= {:shortcuts {:workspace {:draw-rect "shift+r"}}
+            :skipped ["workspace/not-a-real-shortcut"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace {:draw-rect "shift+r"
+                         :not-a-real-shortcut "x"}}))))
+
+(t/deftest sanitize-imported-shortcuts-skips-unknown-contexts
+  (t/is (= {:shortcuts {:workspace {:draw-rect "shift+r"}}
+            :skipped ["unknown-context"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace {:draw-rect "shift+r"}
+             :unknown-context {:draw-rect "shift+r"}}))))
+
+(t/deftest sanitize-imported-shortcuts-skips-non-string-commands
+  (t/is (= {:shortcuts {:workspace {:zoom-lense-decrease "alt+z"}}
+            :skipped ["workspace/draw-rect" "workspace/increase-zoom"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace {:draw-rect 123
+                         :increase-zoom ["+"]
+                         :zoom-lense-decrease "alt+z"}}))))
+
+(t/deftest sanitize-imported-shortcuts-skips-invalid-commands
+  (t/is (= {:shortcuts {:workspace {:zoom-lense-decrease "alt+z"}}
+            :skipped ["workspace/draw-rect" "workspace/increase-zoom"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace {:draw-rect "foo+bar"
+                         :increase-zoom "ctrl+"
+                         :zoom-lense-decrease "alt+z"}}))))
+
+(t/deftest cancel-copy-and-paste-are-not-customizable
+  (t/testing "in the workspace and in the path editor, which share the
+              shortcut keys of the workspace context"
+    (doseq [shortcuts [wsc/shortcuts psc/shortcuts]
+            k         [:escape :copy :paste]]
+      (t/is (false? (get-in shortcuts [k :customizable]))
+            (str k)))))
+
+(t/deftest sanitize-imported-shortcuts-skips-non-customizable-keys
+  (t/testing "cancel, copy and paste cannot be imported, even with a free
+              key combination"
+    (t/is (= {:shortcuts {}
+              :skipped ["workspace/copy" "workspace/escape" "workspace/paste"]}
+             (sut/sanitize-imported-shortcuts
+              {:workspace {:escape "shift+escape"
+                           :copy   "ctrl+shift+1"
+                           :paste  "ctrl+shift+2"}})))))
+
+(t/deftest apply-custom-overrides-skips-non-customizable-shortcuts
+  (t/testing "an override stored before a shortcut became non-customizable
+              is ignored, since the settings page can no longer reset it"
+    (let [shortcuts {:escape {:command "escape" :customizable false}
+                     :undo   {:command "ctrl+z"}}
+          result    (ds/apply-custom-overrides shortcuts
+                                               {:workspace {:escape "shift+escape"
+                                                            :undo   "ctrl+u"}}
+                                               :workspace)]
+      (t/is (= "escape" (get-in result [:escape :command])))
+      (t/is (= "ctrl+u" (get-in result [:undo :command]))))))
+
+(t/deftest sanitize-imported-shortcuts-skips-reserved-commands
+  (t/is (= {:shortcuts {:workspace {:zoom-lense-decrease "alt+z"}}
+            :skipped ["workspace/draw-rect" "workspace/increase-zoom"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace {:draw-rect "escape"
+                         :increase-zoom "ctrl+v"
+                         :zoom-lense-decrease "alt+z"}}))))
+
+(t/deftest sanitize-imported-shortcuts-skips-copy-combination
+  (t/is (= {:shortcuts {:workspace {:draw-rect "ctrl+alt+c"}}
+            :skipped ["workspace/draw-ellipse"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace {:draw-ellipse "ctrl+c"
+                         :draw-rect "ctrl+alt+c"}}))))
+
+(t/deftest sanitize-imported-shortcuts-skips-non-map-context
+  (t/is (= {:shortcuts {:viewer {:next-frame "right"}}
+            :skipped ["workspace"]}
+           (sut/sanitize-imported-shortcuts
+            {:workspace "not-a-map"
+             :viewer {:next-frame "right"}}))))
+
+(t/deftest sanitize-imported-shortcuts-drops-context-without-viable-entries
+  (t/testing "a context whose entries are all skipped is left out, so the
+              import does not clear the user's shortcuts in that context"
+    (t/is (= {:shortcuts {}
+              :skipped ["viewer/not-a-real-shortcut"]}
+             (sut/sanitize-imported-shortcuts
+              {:viewer {:not-a-real-shortcut "x"}})))))
+
+(t/deftest sanitize-imported-shortcuts-keeps-empty-context
+  (t/is (= {:shortcuts {:workspace {}}
+            :skipped []}
+           (sut/sanitize-imported-shortcuts {:workspace {}}))))
+
+(t/deftest sanitize-imported-shortcuts-returns-nil-for-non-maps
+  (t/is (nil? (sut/sanitize-imported-shortcuts nil)))
+  (t/is (nil? (sut/sanitize-imported-shortcuts "shortcuts")))
+  (t/is (nil? (sut/sanitize-imported-shortcuts 42)))
+  (t/is (nil? (sut/sanitize-imported-shortcuts []))))
+
+(t/deftest sanitize-imported-shortcuts-output-is-valid
+  (let [{:keys [shortcuts]} (sut/sanitize-imported-shortcuts
+                             {:workspace {:draw-rect "shift+r"
+                                          :not-a-real-shortcut "x"
+                                          :increase-zoom 1}
+                              :dashboard "not-a-map"
+                              :viewer {:next-frame "right"}
+                              :unknown-context {}})]
+    (t/is (= {:valid? true}
+             (sut/validate-imported-shortcuts shortcuts)))))
+
+(t/deftest valid-command-accepts-key-combinations
+  (t/are [command] (true? (ui-shortcuts/valid-command? command))
+    ""
+    "a"
+    "ctrl+shift+k"
+    "Ctrl+s"
+    "command+alt+ñ"
+    "+"
+    "shift++"
+    "ctrl+plus"
+    "shift+\""
+    "g v"
+    "escape"
+    "Escape"
+    "f1"
+    "f12"
+    "f24"
+    "num5"
+    "alt"))
+
+(t/deftest valid-command-rejects-other-strings
+  (t/are [command] (false? (ui-shortcuts/valid-command? command))
+    "foo"
+    "foo+bar"
+    "a+b"
+    "ctrl+foo"
+    "ctrl+"
+    "ctrl+shift"
+    "++"
+    "f25"
+    "   "
+    " a"
+    "a "
+    "a  b"
+    "🙂"
+    nil
+    123))
+
+(t/deftest reserved-command-matches-non-customizable-combinations
+  (t/testing "cancel, copy and paste keep their keys; spelling and modifier
+              order do not matter, and a reserved step taints a sequence"
+    (with-redefs [cf/check-platform? (constantly false)]
+      (t/are [command] (true? (ui-shortcuts/reserved-command? command))
+        "escape"
+        "Escape"
+        "esc"
+        "ctrl+c"
+        "Control+C"
+        "mod+c"
+        "ctrl+v"
+        "Control+V"
+        "mod+v"
+        "g escape"
+        "ctrl+c g"))))
+
+(t/deftest reserved-command-ignores-other-combinations
+  (with-redefs [cf/check-platform? (constantly false)]
+    (t/are [command] (false? (ui-shortcuts/reserved-command? command))
+      ""
+      "v"
+      "c"
+      "shift+escape"
+      "ctrl+shift+v"
+      "ctrl+shift+c"
+      "ctrl+alt+c"
+      "shift+alt+c"
+      nil)))
+
+(t/deftest valid-command-accepts-every-default-command
+  (t/testing "a profile exported by Penpot always holds valid commands"
+    (doseq [shortcuts [psc/shortcuts wsc/shortcuts dsc/shortcuts vsc/shortcuts]
+            [shortcut-key {:keys [command]}] shortcuts
+            command (if (vector? command) command [command])
+            :when (some? command)]
+      (t/is (ui-shortcuts/valid-command? command)
+            (str shortcut-key " -> " (pr-str command))))))
 
 (t/deftest import-custom-shortcuts-updates-multiple-contexts
   (let [imported {:workspace {:add-comment "alt+c"}
@@ -173,17 +367,17 @@
       (t/is (= "ctrl+shift+a" (:imported select-all-entry))))))
 
 (t/deftest compute-diff-shows-empty-string-as-disabled-shortcut
-  (let [imported {:workspace {:escape ""}}
+  (let [imported {:workspace {:draw-rect ""}}
         current  {}
         diff     (diff-modal/compute-diff imported current)]
     (t/is (pos? (count diff)))
-    (let [entry (first (filter #(= :escape (:key %)) diff))]
+    (let [entry (first (filter #(= :draw-rect (:key %)) diff))]
       (t/is (= :workspace (:context entry)))
       (t/is (= "" (:imported entry))))))
 
 (t/deftest compute-diff-excludes-unchanged-shortcuts
-  (let [imported {:workspace {:escape ""}}
-        current  {:workspace {:escape ""}}
+  (let [imported {:workspace {:draw-rect ""}}
+        current  {:workspace {:draw-rect ""}}
         diff     (diff-modal/compute-diff imported current)]
     (t/is (empty? diff))))
 
@@ -302,17 +496,25 @@
 
 (defn- mock-wrapped-keydown
   "Simulates a goog.events.BrowserEvent-wrapped keydown: `key` and modifiers
-   are forwarded directly, and `code` is only reachable via `getBrowserEvent`.
-   `key` is passed through as-is (not defaulted) so callers can simulate a
-   missing `event.key` with `:key nil` - substituting \"\" would defeat that,
-   since an empty string is truthy in ClojureScript."
-  [{:keys [key code shift ctrl alt meta]}]
-  #js {:key key
-       :shiftKey (boolean shift)
-       :ctrlKey (boolean ctrl)
-       :altKey (boolean alt)
-       :metaKey (boolean meta)
-       :getBrowserEvent (fn [] #js {:code code})})
+   are forwarded directly, and the native event behind `getBrowserEvent`
+   carries every field (`code` and `keyCode` only live there). `key` is
+   passed through as-is (not defaulted) so callers can simulate a missing
+   `event.key` with `:key nil` - substituting \"\" would defeat that, since
+   an empty string is truthy in ClojureScript."
+  [{:keys [key code key-code shift ctrl alt meta]}]
+  (let [native #js {:key key
+                    :code code
+                    :keyCode key-code
+                    :shiftKey (boolean shift)
+                    :ctrlKey (boolean ctrl)
+                    :altKey (boolean alt)
+                    :metaKey (boolean meta)}]
+    #js {:key key
+         :shiftKey (boolean shift)
+         :ctrlKey (boolean ctrl)
+         :altKey (boolean alt)
+         :metaKey (boolean meta)
+         :getBrowserEvent (fn [] native)}))
 
 (defn- mock-native-keydown
   "Simulates a plain, unwrapped native KeyboardEvent (no getBrowserEvent),
@@ -338,7 +540,7 @@
               even when the typed glyph differs"
     (with-redefs [cf/check-platform? (constantly false)]
       (try
-        (reset! ds/layout-map #js {:get (fn [code] (when (= code "Period") "."))})
+        (.setLayoutMap mousetrap #js {:get (fn [code] (when (= code "Period") "."))})
         (t/is (= "shift+."
                  (#'ui-shortcuts/keyboard-event->mousetrap
                   (mock-wrapped-keydown {:key ">" :code "Period" :shift true}))))
@@ -346,7 +548,7 @@
                  (#'ui-shortcuts/keyboard-event->mousetrap
                   (mock-wrapped-keydown {:key ":" :code "Period" :shift true}))))
         (finally
-          (reset! ds/layout-map nil))))))
+          (.setLayoutMap mousetrap nil))))))
 
 (t/deftest mousetrap-shift-period-on-spanish-iso-layout
   (t/testing "Spanish (ISO) layout without a layout map: Shift + Period
@@ -440,28 +642,27 @@
 (t/deftest mousetrap-shifted-digit-resolves-to-digit
   (t/testing "a digit row key held with Shift records the digit itself: US
               Shift+0 types \")\" but records \"shift+0\", so the physical
-              digit key means the same on every layout (production keyCode
-              behavior)"
+              digit key means the same on every layout (named by keyCode)"
     (with-redefs [cf/check-platform? (constantly false)]
       (t/is (= "shift+0"
                (#'ui-shortcuts/keyboard-event->mousetrap
-                (mock-wrapped-keydown {:key ")" :code "Digit0" :shift true}))))
+                (mock-wrapped-keydown {:key ")" :code "Digit0" :key-code 48 :shift true}))))
       (t/is (= "shift+1"
                (#'ui-shortcuts/keyboard-event->mousetrap
-                (mock-wrapped-keydown {:key "!" :code "Digit1" :shift true}))))
+                (mock-wrapped-keydown {:key "!" :code "Digit1" :key-code 49 :shift true}))))
       (t/is (= "shift+2"
                (#'ui-shortcuts/keyboard-event->mousetrap
-                (mock-wrapped-keydown {:key "@" :code "Digit2" :shift true}))))
+                (mock-wrapped-keydown {:key "@" :code "Digit2" :key-code 50 :shift true}))))
       (t/is (= "shift+8"
                (#'ui-shortcuts/keyboard-event->mousetrap
-                (mock-wrapped-keydown {:key "*" :code "Digit8" :shift true})))))))
+                (mock-wrapped-keydown {:key "*" :code "Digit8" :key-code 56 :shift true})))))))
 
 (t/deftest mousetrap-shifted-digit-already-digit-unchanged
   (t/testing "AZERTY Shift+Digit0 already types \"0\": unchanged"
     (with-redefs [cf/check-platform? (constantly false)]
       (t/is (= "shift+0"
                (#'ui-shortcuts/keyboard-event->mousetrap
-                (mock-wrapped-keydown {:key "0" :code "Digit0" :shift true})))))))
+                (mock-wrapped-keydown {:key "0" :code "Digit0" :key-code 48 :shift true})))))))
 
 (t/deftest mousetrap-space-and-named-keys
   (t/testing "\" \" records as space and named keys stay lowercase"
@@ -479,15 +680,15 @@
                (#'ui-shortcuts/keyboard-event->mousetrap
                 (mock-wrapped-keydown {:key "Delete" :code "Delete"})))))))
 
-(t/deftest mousetrap-altgr-drops-phantom-ctrl
-  (t/testing "Spanish AltGr++] types \"]\" with ctrl+alt flags, but the
-              phantom ctrl is dropped so no ctrl+alt shortcut fires"
+(t/deftest mousetrap-altgr-drops-phantom-modifiers
+  (t/testing "Spanish AltGr+] types \"]\" with ctrl+alt flags, but both
+              phantom modifiers are dropped and it records the glyph"
     (with-redefs [cf/check-platform? (constantly false)]
       (let [event #js {:key "]"
                        :shiftKey false :ctrlKey true :altKey true :metaKey false
                        :getModifierState (fn [m] (= m "AltGraph"))
                        :getBrowserEvent (fn [] nil)}]
-        (t/is (= "alt+]"
+        (t/is (= "]"
                  (#'ui-shortcuts/keyboard-event->mousetrap event)))))))
 
 (t/deftest mousetrap-real-ctrl-alt-keeps-both
@@ -506,7 +707,7 @@
               what the user sees and what Mousetrap matches"
     (with-redefs [cf/check-platform? (constantly false)]
       (try
-        (reset! ds/layout-map #js {:get (fn [code] (when (= code "BracketRight") "+"))})
+        (.setLayoutMap mousetrap #js {:get (fn [code] (when (= code "BracketRight") "+"))})
         (t/is (= "shift++"
                  (#'ui-shortcuts/keyboard-event->mousetrap
                   (mock-wrapped-keydown {:key "*" :code "BracketRight" :shift true}))))
@@ -514,7 +715,7 @@
                  (#'ui-shortcuts/keyboard-event->mousetrap
                   (mock-wrapped-keydown {:key "+" :code "BracketRight"}))))
         (finally
-          (reset! ds/layout-map nil))))))
+          (.setLayoutMap mousetrap nil))))))
 
 (t/deftest mousetrap-spanish-shift-plus-without-layout-map-records-glyph
   (t/testing "Spanish layout without a layout map: Shift + the physical
@@ -532,11 +733,24 @@
                (#'ui-shortcuts/keyboard-event->mousetrap
                 (mock-wrapped-keydown {:key "+" :code "BracketRight"})))))))
 
-(t/deftest layout-map-supported-matches-keyboard-api
-  (t/testing "false without a navigator or without a keyboard API"
-    (t/is (false? (ds/layout-map-supported? nil)))
-    (t/is (false? (ds/layout-map-supported? #js {})))
-    (t/is (false? (ds/layout-map-supported? #js {:keyboard #js {}}))))
-  (t/testing "true when getLayoutMap exists (Chromium)"
-    (t/is (true? (ds/layout-map-supported?
-                  #js {:keyboard #js {:getLayoutMap (fn [] nil)}})))))
+(t/deftest mousetrap-shift-digit-records-the-digit
+  (t/testing "Shift+1 types \"!\" but records \"shift+1\", the key the user
+              sees and the default zoom shortcuts use"
+    (with-redefs [cf/check-platform? (constantly false)]
+      (t/is (= "shift+1"
+               (#'ui-shortcuts/keyboard-event->mousetrap
+                (mock-wrapped-keydown {:key "!" :code "Digit1" :key-code 49 :shift true}))))
+      (t/is (= "shift+0"
+               (#'ui-shortcuts/keyboard-event->mousetrap
+                (mock-wrapped-keydown {:key "=" :code "Digit0" :key-code 48 :shift true})))))))
+
+(t/deftest mousetrap-option-letter-records-the-letter
+  (t/testing "macOS Option+M types \"µ\" and Option+E is a dead key, but
+              both record the letter"
+    (with-redefs [cf/check-platform? (constantly false)]
+      (t/is (= "alt+m"
+               (#'ui-shortcuts/keyboard-event->mousetrap
+                (mock-wrapped-keydown {:key "µ" :code "KeyM" :key-code 77 :alt true}))))
+      (t/is (= "alt+e"
+               (#'ui-shortcuts/keyboard-event->mousetrap
+                (mock-wrapped-keydown {:key "Dead" :code "KeyE" :key-code 69 :alt true})))))))
