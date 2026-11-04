@@ -21,7 +21,7 @@
   .marker-text {
     fill: $white;
     font-size: calc(#{px2rem(12)} / var(--zoom));
-    font-family: "worksans", "vazirmatn", sans-serif;
+    font-family: system-ui, "vazirmatn", sans-serif;
   }
 }
 
@@ -45,7 +45,7 @@
   background: none;
   border: 0;
   color: var(--color-accent-quaternary);
-  font-family: "worksans", "vazirmatn", sans-serif;
+  font-family: system-ui, "vazirmatn", sans-serif;
   font-size: calc(#{px2rem(12)} / var(--zoom));
   font-weight: 400;
   margin: 0;
